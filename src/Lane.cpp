@@ -1,97 +1,213 @@
-#include "Lane.h"
-#include "Fmt.hpp"
+#include "libodr/Lane.h"
+#include "libodr/LaneSection.h"
+#include "libodr/Mesh.h"
+#include "libodr/Road.h"
+#include "libodr/RoadMark.h"
+#include "libodr/Sampler.h"
+#include "libodr/Utils.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <fmt/format.h>
+#include <initializer_list>
 #include <iterator>
+#include <set>
+#include <utility>
 
 namespace odr
 {
 
-HeightOffset::HeightOffset(double inner, double outer) : inner(inner), outer(outer) {}
+HeightOffset::HeightOffset(double s_offset, double inner, double outer) : s_offset(s_offset), inner(inner), outer(outer)
+{
+    require_or_throw(s_offset >= 0, "s must be greater than or equal to 0 (got {})", s_offset);
+    require_or_throw(!std::isnan(inner), "inner border must not be NaN");
+    require_or_throw(!std::isnan(outer), "outer border must not be NaN");
+}
 
-LaneKey::LaneKey(std::string road_id, double lanesection_s0, int lane_id) : road_id(road_id), lanesection_s0(lanesection_s0), lane_id(lane_id) {}
+LaneKey::LaneKey(const std::string& road_id, double lane_section_s, int lane_id) : road_id(road_id), lane_section_s(lane_section_s), lane_id(lane_id)
+{
+}
 
 std::string LaneKey::to_string() const
 {
-    return strfmt("%s/%.17g/%d", this->road_id.c_str(), this->lanesection_s0, this->lane_id);
+    return fmt::format("{}/{:.17g}/{}", this->road_id, this->lane_section_s, this->lane_id);
 }
 
-Lane::Lane(std::string road_id, double lanesection_s0, int id, bool level, std::string type) :
-    key(road_id, lanesection_s0, id), id(id), level(level), type(type)
+Lane::Lane(int id, std::optional<std::string> type, std::optional<bool> level) : id(id), type(type), level(level) {}
+
+Vec3D Lane::get_surface_pt(double s, double t, Vec3D* vn, bool allow_extrapolate) const
 {
+    const LaneSection& lane_section = *get_parent_or_throw<LaneSection>(*this);
+    const Road&        road = *get_parent_or_throw<Road>(lane_section);
+
+    const double lane_section_s_end = lane_section.get_end();
+    require_or_throw(allow_extrapolate || (s >= lane_section.s && s <= lane_section_s_end),
+                     "s must be in lane section range [{}, {}] (got {})",
+                     lane_section.s,
+                     lane_section_s_end,
+                     s);
+    const double s_road_clamped = std::min(std::max(s, 0.0), road.length);
+
+    const Lane& inner_lane = lane_section.id_to_lane.at(next_towards_zero(this->id));
+
+    const std::optional<double> t_inner_brdr_opt = inner_lane.outer_border.evaluate(s_road_clamped);
+    require_or_throw(t_inner_brdr_opt.has_value() || inner_lane.id == 0, "lane {} has no outer border at s {}", inner_lane.id, s_road_clamped);
+    const double t_inner_brdr = t_inner_brdr_opt.value_or(0.0);
+    double       h = 0;
+
+    // OpenDRIVE® Format Specification, Rev. 1.4, 5.3.7.2.1.1 Lane Record:
+    // "keep lane on level, .i.e. do not apply superelevation or crossfall"
+    if (this->level.value_or(false))
+    {
+        // compensate crossfall and superelevation to level lane
+        const double alpha = road.crossfall.get(s_road_clamped, (this->id > 0));
+        const double theta = road.superelevation.evaluate(s_road_clamped).value_or(0.0);
+        h = -std::tan(alpha) * std::abs(t_inner_brdr) + std::tan(theta) * (t - t_inner_brdr);
+    }
+    else
+    {
+        h = -std::tan(road.crossfall.get(s_road_clamped, (this->id > 0))) * std::abs(t);
+    }
+
+    // OpenDRIVE® Format Specification, Rev. 1.4, 5.3.7.2.1.1.9 Lane Height Record:
+    // "The surface of a lane may be offset from the plane defined by the reference line and the corresponding elevation and crossfall entries"
+    if (!this->s_to_height_offset.empty())
+    {
+        const auto heights_iter = this->s_to_height_offset.upper_bound(s_road_clamped); // first element > s
+        if (heights_iter != this->s_to_height_offset.begin())                           // s after first <height> record
+        {
+            const HeightOffset&         height_offset = std::prev(heights_iter)->second;
+            const double                h_inner = height_offset.inner;
+            const double                h_outer = height_offset.outer;
+            const std::optional<double> t_outer_brdr = this->outer_border.evaluate(s_road_clamped);
+            require_or_throw(t_outer_brdr.has_value() || this->id == 0, "lane {} has no outer border at s {}", this->id, s_road_clamped);
+            const double t_outer_brdr_value = t_outer_brdr.value_or(0.0);
+            const double t_norm = (t_outer_brdr_value != t_inner_brdr) ? (t - t_inner_brdr) / (t_outer_brdr_value - t_inner_brdr) : 0.0; // [0,1]
+            h += t_norm * (h_outer - h_inner) + h_inner;
+        }
+    }
+
+    return road.get_xyz(s, t, h, nullptr, nullptr, vn, allow_extrapolate);
 }
 
-std::vector<RoadMark> Lane::get_roadmarks(const double s_start, const double s_end) const
+Mesh3D Lane::get_mesh(double eps, std::vector<uint32_t>* outline_indices) const
 {
-    if ((s_start == s_end) || this->roadmark_groups.empty())
+    const LaneSection&     lane_section = *get_parent_or_throw<LaneSection>(*this);
+    const LaneSampler      lane_sampler(*this);
+    const std::set<double> samples = lane_sampler.get_mesh_s_samples(lane_section.s, lane_section.get_end(), eps);
+
+    Mesh3D mesh;
+    for (const double s : samples)
+    {
+        for (const Lane* edge_lane : {this, &lane_sampler.inner_lane})
+        {
+            const std::optional<double> t = edge_lane->outer_border.evaluate(s);
+            require_or_throw(t.has_value() || edge_lane->id == 0, "lane {} has no outer border at s {}", edge_lane->id, s);
+            Vec3D normal{0, 0, 0};
+            mesh.vertices.push_back(this->get_surface_pt(s, t.value_or(0.0), &normal));
+            mesh.normals.push_back(normal);
+            mesh.st_coordinates.push_back({s, t.value_or(0.0)});
+        }
+    }
+
+    const bool ccw = this->id < 0;
+    for (std::size_t idx = 3; idx < mesh.vertices.size(); idx += 2)
+    {
+        const std::array<std::size_t, 6> patch = ccw ? std::array<std::size_t, 6>{idx - 3, idx - 1, idx, idx - 3, idx, idx - 2}
+                                                     : std::array<std::size_t, 6>{idx - 3, idx, idx - 1, idx - 3, idx - 2, idx};
+        mesh.indices.insert(mesh.indices.end(), patch.begin(), patch.end());
+    }
+    if (outline_indices)
+        *outline_indices = get_triangle_strip_outline_indices<uint32_t>(mesh.vertices.size());
+    return mesh;
+}
+
+Mesh3D Lane::get_roadmark_mesh(const SingleRoadMark& roadmark, double eps, bool enforce_road_bounds) const
+{
+    if (is_zero(roadmark.width))
+        return Mesh3D{};
+
+    const std::set<double> s_samples = LaneSampler(*this).get_border_s_samples(roadmark.s_start, roadmark.s_end, roadmark.t_offset, eps);
+
+    Mesh3D out_mesh;
+    for (const double s : s_samples)
+    {
+        Vec3D                       vn_edge_a{0, 0, 0};
+        const std::optional<double> t_lane_outer_border = this->outer_border.evaluate(s);
+        require_or_throw(t_lane_outer_border.has_value() || this->id == 0, "lane {} has no outer border at s {}", this->id, s);
+        const double t_edge_a = t_lane_outer_border.value_or(0.0) + roadmark.width * 0.5 + roadmark.t_offset;
+        out_mesh.vertices.push_back(this->get_surface_pt(s, t_edge_a, &vn_edge_a, !enforce_road_bounds));
+        out_mesh.normals.push_back(vn_edge_a);
+
+        Vec3D        vn_edge_b{0, 0, 0};
+        const double t_edge_b = t_edge_a - roadmark.width;
+        out_mesh.vertices.push_back(this->get_surface_pt(s, t_edge_b, &vn_edge_b, !enforce_road_bounds));
+        out_mesh.normals.push_back(vn_edge_b);
+    }
+
+    const std::size_t num_pts = out_mesh.vertices.size();
+    for (std::size_t idx = 3; idx < num_pts; idx += 2)
+    {
+        std::array<size_t, 6> indicies_patch = {idx - 3, idx, idx - 1, idx - 3, idx - 2, idx};
+        out_mesh.indices.insert(out_mesh.indices.end(), indicies_patch.begin(), indicies_patch.end());
+    }
+
+    return out_mesh;
+}
+
+std::vector<SingleRoadMark> Lane::get_roadmarks(double s_start, double s_end) const
+{
+    if ((s_start == s_end) || this->s_to_road_mark.empty())
         return {};
 
-    auto s_start_rm_iter =
-        std::upper_bound(this->roadmark_groups.begin(),
-                         this->roadmark_groups.end(),
-                         s_start,
-                         [](const double& s, const RoadMarkGroup& rmg) -> bool { return s < (rmg.lanesection_s0 + rmg.s_offset); });
-    if (s_start_rm_iter != this->roadmark_groups.begin())
-        s_start_rm_iter--;
+    // OpenDRIVE Format Specification, Rev. 1.8.1, 11.8 Road markings:
+    // "The <roadMark> elements of a lane shall remain valid until another <roadMark> element starts or the lane section ends."
+    auto rm_iter_start = this->s_to_road_mark.upper_bound(s_start); // first element > s
+    if (rm_iter_start != this->s_to_road_mark.begin())
+        rm_iter_start--;
+    auto rm_iter_end = this->s_to_road_mark.lower_bound(s_end); // first element >= s
 
-    auto s_end_rm_iter = std::lower_bound(this->roadmark_groups.begin(),
-                                          this->roadmark_groups.end(),
-                                          s_end,
-                                          [](const RoadMarkGroup& rmg, const double& s) -> bool { return (rmg.lanesection_s0 + rmg.s_offset) < s; });
-
-    std::vector<RoadMark> roadmarks;
-    for (auto rm_group_iter = s_start_rm_iter; rm_group_iter != s_end_rm_iter; rm_group_iter++)
+    std::vector<SingleRoadMark> roadmarks;
+    for (auto rm_iter = rm_iter_start; rm_iter != rm_iter_end; rm_iter++)
     {
-        const RoadMarkGroup& roadmark_group = *rm_group_iter;
+        const double    s_road_mark = rm_iter->first;
+        const RoadMark& roadmark = rm_iter->second;
 
-        const double roadmark_group_s0 = roadmark_group.lanesection_s0 + roadmark_group.s_offset;
-        const double s_start_roadmark_group = std::max(roadmark_group_s0, s_start);
-        const double s_end_roadmark_group = (std::next(rm_group_iter) == s_end_rm_iter)
-                                                ? s_end
-                                                : std::min(std::next(rm_group_iter)->lanesection_s0 + std::next(rm_group_iter)->s_offset, s_end);
+        double width = RoadMark::StandardWidth;
+        if (roadmark.width)
+            width = roadmark.width.value();
+        else if (roadmark.weight.value_or("standard") == "bold")
+            width = RoadMark::BoldWidth;
 
-        double width = roadmark_group.weight == "bold" ? ROADMARK_WEIGHT_BOLD_WIDTH : ROADMARK_WEIGHT_STANDARD_WIDTH;
-        if (roadmark_group.roadmark_lines.empty())
+        const double s_end_road_mark = (std::next(rm_iter) == rm_iter_end) ? s_end : std::min(std::next(rm_iter)->first, s_end);
+
+        if (roadmark.type_elem)
         {
-            if (roadmark_group.width > 0)
-                width = roadmark_group.width;
+            for (const RoadMarkLine& rm_line : roadmark.type_elem->lines)
+            {
+                if (is_zero(rm_line.length))
+                    continue;
 
-            roadmarks.push_back(RoadMark(this->key.road_id,
-                                         this->key.lanesection_s0,
-                                         this->id,
-                                         roadmark_group_s0,
-                                         s_start_roadmark_group,
-                                         s_end_roadmark_group,
-                                         0,
-                                         width,
-                                         roadmark_group.type));
+                width = rm_line.width.value_or(width);
+                const double space = rm_line.space.value_or(0);
+
+                const double s_road_mark_line = s_road_mark + rm_line.s_offset;
+                for (double s_single_road_mark = s_road_mark_line; s_single_road_mark < s_end_road_mark;
+                     s_single_road_mark += (rm_line.length + space))
+                {
+                    const double s_end_single_road_mark = std::min(s_end, s_single_road_mark + rm_line.length);
+                    roadmarks.emplace_back(s_single_road_mark, s_end_single_road_mark, rm_line.t_offset, width, roadmark.type);
+                    if (is_zero(space)) // treat roadMark::type::line with space = 0 as single roadmark
+                        break;
+                }
+            }
         }
         else
         {
-            for (const RoadMarksLine& roadmarks_line : roadmark_group.roadmark_lines)
-            {
-                if (roadmarks_line.width > 0)
-                    width = roadmarks_line.width;
-
-                if ((roadmarks_line.length + roadmarks_line.space) == 0)
-                    continue;
-
-                const double s0_roadmarks_line = roadmarks_line.group_s0 + roadmarks_line.s_offset;
-                for (double s_start_single_roadmark = s0_roadmarks_line; s_start_single_roadmark < s_end_roadmark_group;
-                     s_start_single_roadmark += (roadmarks_line.length + roadmarks_line.space))
-                {
-                    const double s_end_single_roadmark = std::min(s_end, s_start_single_roadmark + roadmarks_line.length);
-                    roadmarks.push_back(RoadMark(this->key.road_id,
-                                                 this->key.lanesection_s0,
-                                                 this->id,
-                                                 roadmarks_line.group_s0,
-                                                 s_start_single_roadmark,
-                                                 s_end_single_roadmark,
-                                                 roadmarks_line.t_offset,
-                                                 width,
-                                                 roadmark_group.type + roadmarks_line.name));
-                }
-            }
+            roadmarks.emplace_back(std::max(s_road_mark, s_start), s_end_road_mark, 0, width, roadmark.type);
         }
     }
 

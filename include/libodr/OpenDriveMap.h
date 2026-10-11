@@ -1,0 +1,99 @@
+#pragma once
+#include "libodr/Junction.h"
+#include "libodr/Mesh.h"
+#include "libodr/OdrNode.h"
+#include "libodr/Road.h"
+#include "libodr/RoutingGraph.h"
+
+#include "pugixml.hpp"
+
+#include <map>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace odr
+{
+
+struct OpenDriveMapHeader : public OdrNode
+{
+    OpenDriveMapHeader(std::optional<int>         rev_major = std::nullopt,
+                       std::optional<int>         rev_minor = std::nullopt,
+                       std::optional<double>      north = std::nullopt,
+                       std::optional<double>      east = std::nullopt,
+                       std::optional<double>      south = std::nullopt,
+                       std::optional<double>      west = std::nullopt,
+                       std::optional<std::string> date = std::nullopt,
+                       std::optional<std::string> name = std::nullopt,
+                       std::optional<std::string> vendor = std::nullopt,
+                       std::optional<std::string> version = std::nullopt,
+                       std::optional<std::string> proj = std::nullopt);
+
+    std::optional<int> rev_major;
+    std::optional<int> rev_minor;
+
+    std::optional<double> north;
+    std::optional<double> east;
+    std::optional<double> south;
+    std::optional<double> west;
+
+    std::optional<std::string> date;
+    std::optional<std::string> name;
+    std::optional<std::string> vendor;
+    std::optional<std::string> version;
+    std::optional<std::string> proj;
+};
+
+struct XodrParseError
+{
+    pugi::xml_node node;
+    std::string    description;
+};
+
+struct XodrParseResult
+{
+    std::vector<XodrParseError> errors;
+};
+
+struct RoutingParseError
+{
+    const OdrNode* node;
+    std::string    description;
+};
+
+struct RoutingParseResult
+{
+    std::vector<RoutingParseError> errors;
+};
+
+class OpenDriveMap
+{
+public:
+    OpenDriveMap() = default;
+    OpenDriveMap(const OpenDriveMap&) = delete; // not copyable to avoid null'ed parent refernces
+    OpenDriveMap& operator=(const OpenDriveMap&) = delete;
+    OpenDriveMap(OpenDriveMap&&) = default;
+    OpenDriveMap& operator=(OpenDriveMap&&) = default;
+
+    XodrParseResult load(const pugi::xml_document& xml_doc,
+                         bool                      with_road_objects = true,
+                         bool                      with_lateral_profile = true,
+                         bool                      with_lane_height = true,
+                         bool                      local_road_object_outlines_use_absolute_z = false,
+                         bool                      fix_spiral_edge_cases = true,
+                         bool                      with_road_signals = true,
+                         bool                      treat_value_zero_as_missing = true);
+
+    void reset();
+    void set_node_parents();
+
+    Mesh3D       get_mesh(double eps, bool enforce_road_bounds = false, std::vector<std::string>* warnings = nullptr) const;
+    RoutingGraph get_routing_graph(RoutingParseResult* result = nullptr) const;
+
+    OpenDriveMapHeader header;
+
+    std::map<std::string, Road>     id_to_road;
+    std::map<std::string, Junction> id_to_junction;
+};
+
+} // namespace odr

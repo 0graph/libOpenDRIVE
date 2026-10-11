@@ -1,13 +1,13 @@
-#include "Geometries/Line.h"
-#include "Geometries/RoadGeometry.h"
-#include "Math.hpp"
+#include "libodr/Geometries/Line.h"
+#include "libodr/Geometries/RoadGeometry.h"
+#include "libodr/Math.hpp"
 
 #include <cmath>
 
 namespace odr
 {
 
-Line::Line(double s0, double x0, double y0, double hdg0, double length) : RoadGeometry(s0, x0, y0, hdg0, length) {}
+Line::Line(double s, double x, double y, double hdg, double length) : RoadGeometry(s, x, y, hdg, length) {}
 
 std::unique_ptr<RoadGeometry> Line::clone() const
 {
@@ -16,19 +16,14 @@ std::unique_ptr<RoadGeometry> Line::clone() const
 
 Vec2D Line::get_xy(double s) const
 {
-    const double x = (std::cos(hdg0) * (s - s0)) + x0;
-    const double y = (std::sin(hdg0) * (s - s0)) + y0;
-    return Vec2D{x, y};
+    const double x_s = (std::cos(hdg) * (s - this->s)) + x;
+    const double y_s = (std::sin(hdg) * (s - this->s)) + y;
+    return Vec2D{x_s, y_s};
 }
 
 Vec2D Line::derivative([[maybe_unused]] double s) const
 {
-    return {{std::cos(hdg0), std::sin(hdg0)}};
-}
-
-std::set<double> Line::approximate_linear([[maybe_unused]] double eps) const
-{
-    return {s0, s0 + length};
+    return {{std::cos(hdg), std::sin(hdg)}};
 }
 
 } // namespace odr

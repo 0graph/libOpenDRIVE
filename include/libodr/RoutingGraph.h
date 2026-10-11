@@ -1,7 +1,6 @@
 #pragma once
-#include "Lane.h"
+#include "libodr/Lane.h"
 
-#include <algorithm>
 #include <cstddef>
 #include <functional>
 #include <string>
@@ -25,7 +24,7 @@ struct RoutingGraphEdge
 struct WeightedLaneKey : public LaneKey
 {
     WeightedLaneKey(const LaneKey& lane_key, double weight);
-    WeightedLaneKey(std::string road_id, double lanesection_s0, int lane_id, double weight);
+    WeightedLaneKey(const std::string& road_id, double lane_section_s, int lane_id, double weight);
 
     double weight = 0;
 };

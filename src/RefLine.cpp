@@ -1,14 +1,16 @@
-#include "RefLine.h"
-#include "Math.hpp"
-#include "Utils.hpp"
+#include "libodr/RefLine.h"
+#include "libodr/Geometries/RoadGeometry.h"
+#include "libodr/Math.hpp"
+#include "libodr/Sampler.h"
+#include "libodr/Utils.hpp"
 
 #include <algorithm>
 #include <cmath>
-#include <functional>
 #include <iterator>
-#include <stdexcept>
+#include <limits>
+#include <optional>
+#include <set>
 #include <utility>
-#include <vector>
 
 namespace odr
 {
@@ -17,128 +19,73 @@ RefLine::RefLine(double length) : length(length) {}
 
 RefLine::RefLine(const RefLine& other) : length(other.length), elevation_profile(other.elevation_profile)
 {
-    for (const auto& s0_geometry : other.s0_to_geometry)
-        this->s0_to_geometry.emplace(s0_geometry.first, s0_geometry.second->clone());
+    for (const auto& [s, geometry] : other.s_to_geometry)
+        this->s_to_geometry.emplace(s, geometry->clone());
 }
 
-std::set<const RoadGeometry*> RefLine::get_geometries() const
+const RoadGeometry* RefLine::get_geometry(double s) const
 {
-    std::set<const RoadGeometry*> geometries;
-    for (const auto& s0_geometry : this->s0_to_geometry)
-        geometries.insert(s0_geometry.second.get());
-    return geometries;
-}
-
-std::set<RoadGeometry*> RefLine::get_geometries()
-{
-    std::set<RoadGeometry*> geometries;
-    for (auto& s0_geometry : this->s0_to_geometry)
-        geometries.insert(s0_geometry.second.get());
-    return geometries;
-}
-
-double RefLine::get_geometry_s0(const double s) const
-{
-    if (this->s0_to_geometry.empty())
-        return NAN;
-    auto target_geom_iter = this->s0_to_geometry.upper_bound(s);
-    if (target_geom_iter != s0_to_geometry.begin())
-        target_geom_iter--;
-    return target_geom_iter->first;
-}
-
-const RoadGeometry* RefLine::get_geometry(const double s) const
-{
-    const double geom_s0 = this->get_geometry_s0(s);
-    if (std::isnan(geom_s0))
+    if (this->s_to_geometry.empty())
         return nullptr;
-    return this->s0_to_geometry.at(geom_s0).get();
+
+    auto target_geom_iter = this->s_to_geometry.upper_bound(s); // first element > s
+    if (target_geom_iter != this->s_to_geometry.begin())
+        target_geom_iter--;
+    return target_geom_iter->second.get();
 }
 
-RoadGeometry* RefLine::get_geometry(const double s)
+RoadGeometry* RefLine::get_geometry(double s)
 {
     RoadGeometry* road_geometry = const_cast<RoadGeometry*>(static_cast<const RefLine&>(*this).get_geometry(s));
     return road_geometry;
 }
 
-Vec3D RefLine::get_xyz(const double s) const
+Vec3D RefLine::get_xyz(double s) const
 {
     const RoadGeometry* geom = this->get_geometry(s);
-
-    Vec2D pt_xy{0, 0};
-    if (geom)
-        pt_xy = geom->get_xy(s);
-
-    return Vec3D{pt_xy[0], pt_xy[1], this->elevation_profile.evaluate(s)};
+    require_or_throw(geom != nullptr, "reference line has no geometry at s {}", s);
+    const Vec2D pt_xy = geom->get_xy(s);
+    return Vec3D{pt_xy[0], pt_xy[1], this->elevation_profile.evaluate(s).value_or(0.0)};
 }
 
-Vec3D RefLine::derivative(const double s) const
+Vec3D RefLine::derivative(double s) const
 {
     const RoadGeometry* geom = this->get_geometry(s);
-
-    Vec2D d_xy{0, 0};
-    if (geom)
-        d_xy = geom->derivative(s);
-
-    return Vec3D{d_xy[0], d_xy[1], this->elevation_profile.derivative(s)};
+    require_or_throw(geom != nullptr, "reference line has no geometry at s {}", s);
+    const Vec2D d_xy = geom->derivative(s);
+    return Vec3D{d_xy[0], d_xy[1], this->elevation_profile.derivative(s).value_or(0.0)};
 }
 
-double RefLine::match(const double x, const double y) const
+double RefLine::match(double x, double y) const
 {
-    std::function<double(double)> f_dist = [&](const double s)
+    if (length <= 0.0)
+        return 0.0;
+
+    const std::set<double> samples = RefLineSampler(*this).get_polyline_s_samples(0.0, length, 1e-2);
+    double                 best_s = 0.0;
+    double                 best_dist = std::numeric_limits<double>::infinity();
+
+    auto  prev = samples.begin();
+    Vec3D prev_pt = get_xyz(*prev);
+    for (auto it = std::next(prev); it != samples.end(); ++it)
     {
-        const Vec3D pt = this->get_xyz(s);
-        return euclDistance(Vec2D{pt[0], pt[1]}, {x, y});
-    };
-    return golden_section_search<double>(f_dist, 0.0, length, 1e-2);
-}
-
-Line3D RefLine::get_line(const double s_start, const double s_end, const double eps) const
-{
-    std::set<double> s_vals = this->approximate_linear(eps, s_start, s_end);
-
-    Line3D out_line;
-    for (const double& s : s_vals)
-        out_line.push_back(this->get_xyz(s));
-    return out_line;
-}
-
-std::set<double> RefLine::approximate_linear(const double eps, const double s_start, const double s_end) const
-{
-    if ((s_start == s_end) || this->s0_to_geometry.empty())
-        return {};
-
-    auto s_end_geom_iter = this->s0_to_geometry.lower_bound(s_end);
-    auto s_start_geom_iter = this->s0_to_geometry.upper_bound(s_start);
-    if (s_start_geom_iter != s0_to_geometry.begin())
-        s_start_geom_iter--;
-
-    std::vector<double> s_vals{s_start};
-    for (auto s0_geom_iter = s_start_geom_iter; s0_geom_iter != s_end_geom_iter; s0_geom_iter++)
-    {
-        const std::set<double> s_vals_geom = s0_geom_iter->second->approximate_linear(eps);
-        if (s_vals_geom.size() < 2)
-            throw std::runtime_error("expected at least two sample points");
-        for (const double& s : s_vals_geom)
+        const Vec3D  pt = get_xyz(*it);
+        const double dx = pt[0] - prev_pt[0];
+        const double dy = pt[1] - prev_pt[1];
+        const double length_sq = dx * dx + dy * dy;
+        const double fraction = length_sq == 0.0 ? 0.0 : std::clamp(((x - prev_pt[0]) * dx + (y - prev_pt[1]) * dy) / length_sq, 0.0, 1.0);
+        const double s = *prev + fraction * (*it - *prev);
+        const Vec3D  candidate = get_xyz(s);
+        const double dist = std::hypot(candidate[0] - x, candidate[1] - y);
+        if (dist < best_dist)
         {
-            if (s > s_start && s < s_end)
-                s_vals.push_back(s);
+            best_dist = dist;
+            best_s = s;
         }
-        if (std::next(s0_geom_iter) != s_end_geom_iter)
-            s_vals.pop_back();
+        prev = it;
+        prev_pt = pt;
     }
-
-    std::set<double> s_vals_elevation = this->elevation_profile.approximate_linear(eps, s_start, s_end);
-    for (const double& s : s_vals_elevation)
-    {
-        if (s > s_start && s < s_end)
-            s_vals.push_back(s);
-    }
-
-    s_vals.push_back(s_end);
-
-    std::set<double> s_vals_set(s_vals.begin(), s_vals.end());
-    return s_vals_set;
+    return best_s;
 }
 
 } // namespace odr

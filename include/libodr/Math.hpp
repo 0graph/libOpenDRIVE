@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <functional>
 #include <numeric>
 #include <type_traits>
@@ -16,6 +17,7 @@ using Vec = std::array<T, Dim>;
 using Vec1D = Vec<double, 1>;
 using Vec2D = Vec<double, 2>;
 using Vec3D = Vec<double, 3>;
+using Line2D = std::vector<Vec2D>;
 using Line3D = std::vector<Vec3D>;
 
 template<typename T,
@@ -81,7 +83,7 @@ constexpr Vec<T, Dim> mut(const T& scalar, const Vec<T, Dim>& a)
 }
 
 template<typename T, std::size_t Dim, typename std::enable_if_t<std::is_arithmetic<T>::value>* = nullptr>
-constexpr T euclDistance(const Vec<T, Dim> a, const Vec<T, Dim> b)
+constexpr T euclDistance(const Vec<T, Dim>& a, const Vec<T, Dim>& b)
 {
     return std::sqrt(std::inner_product(a.begin(),
                                         a.end(),
@@ -135,7 +137,7 @@ constexpr Vec<T, Dim> MatVecMultiplication(const Mat<T, Dim>& m, const Vec<T, Di
 template<typename T, typename std::enable_if_t<std::is_arithmetic<T>::value>* = nullptr>
 constexpr Mat<T, 3> EulerAnglesToMatrix(const T& r_x, const T& r_y, const T& r_z)
 {
-    /* precompute sines and cosines of Euler angles */
+    // precompute sines and cosines of Euler angles
     const T su = std::sin(r_x);
     const T cu = std::cos(r_x);
     const T sv = std::sin(r_y);
@@ -143,7 +145,7 @@ constexpr Mat<T, 3> EulerAnglesToMatrix(const T& r_x, const T& r_y, const T& r_z
     const T sw = std::sin(r_z);
     const T cw = std::cos(r_z);
 
-    /* create and populate RotationMatrix */
+    // create and populate RotationMatrix
     Mat<T, 3> RotMat{};
     RotMat[0][0] = cv * cw;
     RotMat[0][1] = su * sv * cw - cu * sw;

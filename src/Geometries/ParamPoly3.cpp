@@ -1,6 +1,7 @@
-#include "Geometries/ParamPoly3.h"
-#include "Geometries/RoadGeometry.h"
-#include "Math.hpp"
+#include "libodr/Geometries/ParamPoly3.h"
+#include "libodr/Geometries/RoadGeometry.h"
+#include "libodr/Math.hpp"
+#include "libodr/Utils.hpp"
 
 #include <array>
 #include <cmath>
@@ -9,10 +10,10 @@
 namespace odr
 {
 
-ParamPoly3::ParamPoly3(double s0,
-                       double x0,
-                       double y0,
-                       double hdg0,
+ParamPoly3::ParamPoly3(double s,
+                       double x,
+                       double y,
+                       double hdg,
                        double length,
                        double aU,
                        double bU,
@@ -22,10 +23,19 @@ ParamPoly3::ParamPoly3(double s0,
                        double bV,
                        double cV,
                        double dV,
-                       bool   pRange_normalized) :
-    RoadGeometry(s0, x0, y0, hdg0, length), aU(aU), bU(bU), cU(cU), dU(dU), aV(aV), bV(bV), cV(cV), dV(dV), pRange_normalized(pRange_normalized)
+                       PRange p_range) :
+    RoadGeometry(s, x, y, hdg, length), aU(aU), bU(bU), cU(cU), dU(dU), aV(aV), bV(bV), cV(cV), dV(dV), p_range(p_range)
 {
-    if (!pRange_normalized)
+    require_or_throw(!std::isnan(aU), "aU must not be NaN");
+    require_or_throw(!std::isnan(bU), "bU must not be NaN");
+    require_or_throw(!std::isnan(cU), "cU must not be NaN");
+    require_or_throw(!std::isnan(dU), "dU must not be NaN");
+    require_or_throw(!std::isnan(aV), "aV must not be NaN");
+    require_or_throw(!std::isnan(bV), "bV must not be NaN");
+    require_or_throw(!std::isnan(cV), "cV must not be NaN");
+    require_or_throw(!std::isnan(dV), "dV must not be NaN");
+
+    if (p_range == PRange::ArcLength) // normalize
     {
         this->bU = bU * length;
         this->bV = bV * length;
@@ -49,37 +59,28 @@ std::unique_ptr<RoadGeometry> ParamPoly3::clone() const
 
 Vec2D ParamPoly3::get_xy(double s) const
 {
-    const double p = this->cubic_bezier.get_t(s - s0);
+    const double p = this->cubic_bezier.get_t(s - this->s);
     const Vec2D  pt = this->cubic_bezier.evaluate(p);
 
-    const double xt = (std::cos(hdg0) * pt[0]) - (std::sin(hdg0) * pt[1]) + x0;
-    const double yt = (std::sin(hdg0) * pt[0]) + (std::cos(hdg0) * pt[1]) + y0;
+    const double cos_hdg = std::cos(hdg);
+    const double sin_hdg = std::sin(hdg);
+    const double x_t = (cos_hdg * pt[0]) - (sin_hdg * pt[1]) + x;
+    const double y_t = (sin_hdg * pt[0]) + (cos_hdg * pt[1]) + y;
 
-    return Vec2D{xt, yt};
+    return Vec2D{x_t, y_t};
 }
 
 Vec2D ParamPoly3::derivative(double s) const
 {
-    const double p = this->cubic_bezier.get_t(s - s0);
-    const Vec2D  dxy = this->cubic_bezier.derivative(p);
+    const double p = this->cubic_bezier.get_t(s - this->s);
+    const Vec2D  dxy = normalize(this->cubic_bezier.derivative(p));
 
-    const double h1 = std::cos(hdg0);
-    const double h2 = std::sin(hdg0);
+    const double h1 = std::cos(hdg);
+    const double h2 = std::sin(hdg);
     const double dx = h1 * dxy[0] - h2 * dxy[1];
     const double dy = h2 * dxy[0] + h1 * dxy[1];
 
     return {{dx, dy}};
-}
-
-std::set<double> ParamPoly3::approximate_linear(double eps) const
-{
-    std::set<double> p_vals = this->cubic_bezier.approximate_linear(eps);
-
-    std::set<double> s_vals;
-    for (const double& p : p_vals)
-        s_vals.insert(p * length + s0);
-
-    return s_vals;
 }
 
 } // namespace odr

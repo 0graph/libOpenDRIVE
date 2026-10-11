@@ -1,13 +1,17 @@
 #pragma once
-#include "Fmt.hpp"
-#include "Math.hpp"
-#include "Utils.hpp"
+#include "libodr/Math.hpp"
+#include "libodr/Utils.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
+#include <fmt/format.h>
+#include <iterator>
 #include <map>
 #include <set>
-#include <sstream>
+#include <stdexcept>
+#include <vector>
 
 namespace odr
 {
@@ -18,16 +22,15 @@ struct CubicBezier
     CubicBezier() = default;
     CubicBezier(std::array<Vec<T, Dim>, 4> control_points);
 
-    Vec<T, Dim>                evaluate(const T t) const;
-    Vec<T, Dim>                derivative(const T t) const;
-    T                          get_t(const T arclen) const;
-    T                          get_length() const;
-    std::array<Vec<T, Dim>, 4> get_subcurve(const T t_start, const T t_end) const;
-    std::set<T>                approximate_linear(const T eps) const;
+    Vec<T, Dim>                evaluate(T t) const;
+    Vec<T, Dim>                derivative(T t) const;
+    T                          get_t(T arclen) const;
+    std::array<Vec<T, Dim>, 4> get_subcurve(T t_start, T t_end) const;
+    std::set<T>                get_polyline_t_samples(T eps) const;
 
     static std::array<Vec<T, Dim>, 4> get_control_points(const std::array<Vec<T, Dim>, 4>& coefficients)
     {
-        /* a + b*x + c*x^2 +d*x^3 */
+        // a + b*x + c*x^2 +d*x^3
         const Vec<T, Dim>& a = coefficients[0];
         const Vec<T, Dim>& b = coefficients[1];
         const Vec<T, Dim>& c = coefficients[2];
@@ -74,13 +77,13 @@ struct CubicBezier
 
     std::array<Vec<T, Dim>, 4> control_points;
     std::map<T, T>             arclen_t;
-    static const double        LengthTolerance;
+    static const double        ArcLengthLookupTolerance;
 };
 
 template<typename T, std::size_t Dim>
 CubicBezier<T, Dim>::CubicBezier(std::array<Vec<T, Dim>, 4> control_points) : control_points(control_points)
 {
-    const std::set<T> t_vals = this->approximate_linear(this->LengthTolerance);
+    const std::set<T> t_vals = this->get_polyline_t_samples(this->ArcLengthLookupTolerance);
     if (t_vals.size() < 2)
         throw std::runtime_error("expected at least two t values");
 
@@ -99,7 +102,7 @@ CubicBezier<T, Dim>::CubicBezier(std::array<Vec<T, Dim>, 4> control_points) : co
 }
 
 template<typename T, std::size_t Dim>
-Vec<T, Dim> CubicBezier<T, Dim>::evaluate(const T t) const
+Vec<T, Dim> CubicBezier<T, Dim>::evaluate(T t) const
 {
     Vec<T, Dim> out_pt;
     for (std::size_t dim = 0; dim < Dim; dim++)
@@ -109,16 +112,15 @@ Vec<T, Dim> CubicBezier<T, Dim>::evaluate(const T t) const
 }
 
 template<typename T, std::size_t Dim>
-T CubicBezier<T, Dim>::get_t(const T arclen) const
+T CubicBezier<T, Dim>::get_t(T arclen) const
 {
-    if ((arclen - this->valid_length) > this->LengthTolerance || arclen < 0)
-    {
-        throw std::runtime_error(strfmt("arc length %.3f out of range; valid length: %.3f", arclen, this->valid_length));
-    }
+    if ((arclen - this->valid_length) > this->ArcLengthLookupTolerance || arclen < -this->ArcLengthLookupTolerance)
+        throw std::runtime_error(fmt::format("arc length must be in range [0, {:.3f}] (got {:.3f})", this->valid_length, arclen));
 
-    const T arclen_adj = std::min<T>(arclen, this->valid_length);
+    const T arclen_adj = std::clamp<T>(arclen, 0, this->valid_length);
 
-    auto arclen_t_iter = this->arclen_t.upper_bound(arclen_adj);
+    auto arclen_t_next_iter = this->arclen_t.upper_bound(arclen_adj);
+    auto arclen_t_iter = arclen_t_next_iter;
     if (arclen_t_iter != this->arclen_t.begin())
         arclen_t_iter--;
 
@@ -127,8 +129,10 @@ T CubicBezier<T, Dim>::get_t(const T arclen) const
     if (arclen_adj == arcl_lower_bound)
         return t_lower_bound;
 
-    const T arcl_upper_bound = std::next(arclen_t_iter)->first;
-    const T t_upper_bound = std::next(arclen_t_iter)->second;
+    if (arclen_t_next_iter == arclen_t_iter || arclen_t_next_iter == this->arclen_t.end())
+        arclen_t_next_iter = std::next(arclen_t_iter);
+    const T arcl_upper_bound = arclen_t_next_iter->first;
+    const T t_upper_bound = arclen_t_next_iter->second;
     const T seg_arc_len = arcl_upper_bound - arcl_lower_bound;
     const T seg_t_len = t_upper_bound - t_lower_bound;
 
@@ -136,13 +140,7 @@ T CubicBezier<T, Dim>::get_t(const T arclen) const
 }
 
 template<typename T, std::size_t Dim>
-T CubicBezier<T, Dim>::get_length() const
-{
-    return std::prev(arclen_t.end())->first;
-}
-
-template<typename T, std::size_t Dim>
-Vec<T, Dim> CubicBezier<T, Dim>::derivative(const T t) const
+Vec<T, Dim> CubicBezier<T, Dim>::derivative(T t) const
 {
     std::array<Vec<T, Dim>, 4> coefficients = this->get_coefficients(this->control_points);
 
@@ -154,10 +152,10 @@ Vec<T, Dim> CubicBezier<T, Dim>::derivative(const T t) const
 }
 
 template<typename T, std::size_t Dim>
-std::array<Vec<T, Dim>, 4> CubicBezier<T, Dim>::get_subcurve(const T t_start, const T t_end) const
+std::array<Vec<T, Dim>, 4> CubicBezier<T, Dim>::get_subcurve(T t_start, T t_end) const
 {
-    /* modified evaluate(T t) allowing different t values for segments */
-    auto f_cubic_t123 = [](const T& t1, const T& t2, const T& t3, const std::array<Vec<T, Dim>, 4>& ctrl_pts) -> Vec<T, Dim>
+    // modified evaluate(T t) allowing different t values for segments
+    auto f_cubic_t123 = [](T t1, T t2, T t3, const std::array<Vec<T, Dim>, 4>& ctrl_pts) -> Vec<T, Dim>
     {
         Vec<T, Dim> out;
         for (std::size_t dim = 0; dim < Dim; dim++)
@@ -180,9 +178,11 @@ std::array<Vec<T, Dim>, 4> CubicBezier<T, Dim>::get_subcurve(const T t_start, co
 }
 
 template<typename T, std::size_t Dim>
-std::set<T> CubicBezier<T, Dim>::approximate_linear(const T eps) const
+std::set<T> CubicBezier<T, Dim>::get_polyline_t_samples(T eps) const
 {
-    /* approximate cubic bezier by splitting into quadratic ones */
+    require_or_throw(std::isfinite(eps) && eps > 0, "eps must be finite and greater than 0 (got {})", eps);
+
+    // approximate cubic bezier by splitting into quadratic ones
     std::array<Vec<T, Dim>, 4> coefficients = this->get_coefficients(this->control_points);
     const T                    seg_size = std::pow(0.5 * eps / ((1.0 / 54.0) * norm(coefficients[3])), (1.0 / 3.0));
 
@@ -198,13 +198,13 @@ std::set<T> CubicBezier<T, Dim>::approximate_linear(const T eps) const
     std::vector<T> t_vals{0};
     for (const std::array<T, 2>& seg_intrvl : seg_intervals)
     {
-        /* get sub-cubic bezier for interval */
-        const double& t0 = seg_intrvl.at(0);
-        const double& t1 = seg_intrvl.at(1);
+        // get sub-cubic bezier for interval
+        const double t0 = seg_intrvl.at(0);
+        const double t1 = seg_intrvl.at(1);
 
         const std::array<Vec<T, Dim>, 4> c_pts_sub = this->get_subcurve(t0, t1);
 
-        /* approximate sub-cubic bezier by two quadratic ones */
+        // approximate sub-cubic bezier by two quadratic ones
         Vec<T, Dim> pB_quad_0;
         for (std::size_t dim = 0; dim < Dim; dim++)
             pB_quad_0[dim] = (1.0 - 0.75) * c_pts_sub[0][dim] + 0.75 * c_pts_sub[1][dim];
@@ -215,11 +215,11 @@ std::set<T> CubicBezier<T, Dim>::approximate_linear(const T eps) const
         for (std::size_t dim = 0; dim < Dim; dim++)
             pM_quad[dim] = (1.0 - 0.5) * pB_quad_0[dim] + 0.5 * pB_quad_1[dim];
 
-        /* linear approximate the two quadratic bezier */
-        for (const double& p_sub : approximate_linear_quad_bezier<T, Dim>({c_pts_sub[0], pB_quad_0, pM_quad}, 0.5 * eps))
+        // linear approximate the two quadratic bezier
+        for (const double p_sub : approximate_linear_quad_bezier<T, Dim>({c_pts_sub[0], pB_quad_0, pM_quad}, 0.5 * eps))
             t_vals.push_back(t0 + p_sub * (t1 - t0) * 0.5);
         t_vals.pop_back();
-        for (const double& p_sub : approximate_linear_quad_bezier<T, Dim>({pM_quad, pB_quad_1, c_pts_sub[3]}, 0.5 * eps))
+        for (const double p_sub : approximate_linear_quad_bezier<T, Dim>({pM_quad, pB_quad_1, c_pts_sub[3]}, 0.5 * eps))
             t_vals.push_back(t0 + (t1 - t0) * 0.5 + p_sub * (t1 - t0) * 0.5);
         t_vals.pop_back();
     }
@@ -229,9 +229,8 @@ std::set<T> CubicBezier<T, Dim>::approximate_linear(const T eps) const
 }
 
 template<typename T, std::size_t Dim>
-const double CubicBezier<T, Dim>::LengthTolerance = 1e-2;
+const double CubicBezier<T, Dim>::ArcLengthLookupTolerance = 1e-3;
 
 typedef CubicBezier<double, 2> CubicBezier2D;
-typedef CubicBezier<double, 1> CubicBezier1D;
 
 } // namespace odr

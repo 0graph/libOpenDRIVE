@@ -23,6 +23,40 @@ if(NOT TARGET pugixml::pugixml)
     endif()
 endif()
 
+find_package(fmt QUIET CONFIG)
+if(NOT TARGET fmt::fmt)
+    if(TARGET fmt)
+        add_library(fmt::fmt ALIAS fmt)
+    else()
+        if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+            set(FMT_INSTALL ON CACHE BOOL "" FORCE)
+        endif()
+        FetchContent_Declare(
+            fmtlib
+            GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+            GIT_TAG 12.1.0
+        )
+        FetchContent_MakeAvailable(fmtlib)
+    endif()
+endif()
+
+find_package(magic_enum QUIET CONFIG)
+if(NOT TARGET magic_enum::magic_enum)
+    if(TARGET magic_enum)
+        add_library(magic_enum::magic_enum ALIAS magic_enum)
+    else()
+        if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+            set(MAGIC_ENUM_OPT_INSTALL ON CACHE BOOL "" FORCE)
+        endif()
+        FetchContent_Declare(
+            magic_enum
+            GIT_REPOSITORY https://github.com/Neargye/magic_enum.git
+            GIT_TAG v0.9.8
+        )
+        FetchContent_MakeAvailable(magic_enum)
+    endif()
+endif()
+
 set(SOURCES
     src/Geometries/Arc.cpp
     src/Geometries/CubicSpline.cpp
@@ -33,13 +67,14 @@ set(SOURCES
     src/Geometries/Spiral/odrSpiral.cpp
     src/Junction.cpp
     src/Lane.cpp
+    src/Sampler.cpp
     src/LaneSection.cpp
     src/Mesh.cpp
+    src/OdrNode.cpp
     src/OpenDriveMap.cpp
     src/RefLine.cpp
     src/Road.cpp
     src/RoadMark.cpp
-    src/RoadNetworkMesh.cpp
     src/RoadObject.cpp
     src/RoadSignal.cpp
     src/RoutingGraph.cpp
@@ -60,6 +95,8 @@ else()
 endif()
 
 target_link_libraries(OpenDrive PUBLIC pugixml::pugixml)
+target_link_libraries(OpenDrive PUBLIC fmt::fmt)
+target_link_libraries(OpenDrive PUBLIC magic_enum::magic_enum)
 
 target_include_directories(
     OpenDrive PUBLIC
@@ -86,38 +123,40 @@ if(OPENDRIVE_BUILD_TESTS)
     catch_discover_tests(tests WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 endif()
 
-install(
-    TARGETS OpenDrive
-    EXPORT OpenDriveTargets
-    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-)
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    install(
+        TARGETS OpenDrive
+        EXPORT OpenDriveTargets
+        INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
 
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/libodr DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
-install(
-    EXPORT OpenDriveTargets
-    NAMESPACE OpenDrive::
-    FILE OpenDriveTargets.cmake
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/OpenDrive
-)
+    install(
+        EXPORT OpenDriveTargets
+        NAMESPACE OpenDrive::
+        FILE OpenDriveTargets.cmake
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/OpenDrive
+    )
 
-write_basic_package_version_file(
-    "${CMAKE_CURRENT_BINARY_DIR}/OpenDriveConfigVersion.cmake"
-    VERSION ${PROJECT_VERSION}
-    COMPATIBILITY ExactVersion
-)
+    write_basic_package_version_file(
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenDriveConfigVersion.cmake"
+        VERSION ${PROJECT_VERSION}
+        COMPATIBILITY ExactVersion
+    )
 
-configure_package_config_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/OpenDriveConfig.cmake.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/OpenDriveConfig.cmake"
-    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/OpenDrive
-)
+    configure_package_config_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/OpenDriveConfig.cmake.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenDriveConfig.cmake"
+        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/OpenDrive
+    )
 
-install(FILES
-    "${CMAKE_CURRENT_BINARY_DIR}/OpenDriveConfig.cmake"
-    "${CMAKE_CURRENT_BINARY_DIR}/OpenDriveConfigVersion.cmake"
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/OpenDrive
-)
+    install(FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenDriveConfig.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenDriveConfigVersion.cmake"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/OpenDrive
+    )
+endif()
