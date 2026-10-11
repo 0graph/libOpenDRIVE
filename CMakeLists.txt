@@ -104,6 +104,15 @@ target_include_directories(
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
+if(EMSCRIPTEN)
+    target_compile_options(OpenDrive PUBLIC -fexceptions)
+    add_executable(OpenDriveWasm wasm/Embind.cpp)
+    target_link_libraries(OpenDriveWasm PRIVATE OpenDrive::OpenDrive)
+    target_compile_features(OpenDriveWasm PRIVATE cxx_std_17)
+    set_target_properties(OpenDriveWasm PROPERTIES OUTPUT_NAME libOpenDRIVE SUFFIX ".mjs")
+    target_link_options(OpenDriveWasm PRIVATE --bind -fexceptions -sMODULARIZE=1 -sALLOW_MEMORY_GROWTH=1)
+endif()
+
 if(OPENDRIVE_BUILD_TESTS)
     include(CTest)
     FetchContent_Declare(
