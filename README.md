@@ -70,6 +70,8 @@ cmake --build build/wasm --parallel
 
 The output is `build/wasm/libOpenDRIVE.mjs` and `libOpenDRIVE.wasm`.
 
+Follow Embind ownership rules: delete constructed objects and owned results (such as meshes and routing graphs), but never delete references obtained from model properties or model collections. Keep the owner alive and discard those references before reloading, resetting, or changing the owner's storage. Standard value collections return copies; model collection `get()` returns a reference or `null` when missing.
+
 ## Viewer
 Check out the viewer at [odrviewer.io](https://odrviewer.io) which uses this library. Use the [odrviewer project](https://github.com/pageldev/odrviewer) to post issues and feature requests for odrviewer.io.
 

@@ -24,65 +24,37 @@ namespace
 using namespace odr;
 using namespace emscripten;
 
-// Borrowed handles preserve parent links and never delete their owner's storage.
-// Keep the owner alive and do not retain handles across its reset or mutation.
-// Embind requires const property getters; the underlying model remains mutable.
-template<typename T>
-val borrow(const T* value)
-{
-    return value ? val(std::shared_ptr<T>(const_cast<T*>(value), [](T*) {})) : val::null();
-}
+// Reference properties and model collection elements belong to their C++ owner.
+// Do not delete them from JS or use them after owner destruction/reset/mutation.
+// Constructed objects and results returned by value must be deleted from JS.
+// Const member pointers select read-only properties without copying their contents.
+// Optional object getters cast away Embind's required const getter parameter;
+// their backing model is mutable, just like the member properties.
 
+// Embind's standard container getters copy elements, dropping OdrNode parents.
 template<typename T>
-val borrow(const std::optional<T>& value)
-{
-    return value ? borrow(&*value) : val::undefined();
-}
-
-template<typename T>
-val borrow_value(const T& value)
-{
-    return borrow(&value);
-}
-
-template<typename T>
-val borrow_value(const std::unique_ptr<T>& value)
-{
-    return borrow(value.get());
-}
-
-template<typename T>
-val copy_value(const T& value)
-{
-    return val(value);
-}
-
-// Collection access borrows model objects and copies scalar/array values.
-template<typename T, val (*Get)(const T&)>
-void bind_vector(const std::string& name)
+void bind_reference_vector(const char* name)
 {
     using V = std::vector<T>;
-
-    class_<V>(name.c_str())
-        .template smart_ptr<std::shared_ptr<V>>((name + "Handle").c_str())
+    class_<V>(name)
         .function("size", &V::size)
         .function(
-            "get", +[](const V& values, std::size_t i) { return i < values.size() ? Get(values[i]) : val::undefined(); });
+            "get", +[](V& values, std::size_t i) -> T* { return i < values.size() ? &values[i] : nullptr; }, return_value_policy::reference());
 }
 
-template<typename M, val (*Get)(const typename M::mapped_type&)>
-void bind_map(const std::string& name)
+template<typename M>
+void bind_reference_map(const char* name)
 {
-    class_<M>(name.c_str())
-        .template smart_ptr<std::shared_ptr<M>>((name + "Handle").c_str())
+    class_<M>(name)
         .function("size", &M::size)
         .function(
             "get",
-            +[](const M& values, const typename M::key_type& key)
+            +[](M& values, const typename M::key_type& key) -> typename M::mapped_type*
             {
                 const auto it = values.find(key);
-                return it == values.end() ? val::undefined() : Get(it->second);
-            })
+                return it == values.end() ? nullptr : &it->second;
+            },
+            return_value_policy::reference())
         .function(
             "keys",
             +[](const M& values)
@@ -94,11 +66,11 @@ void bind_map(const std::string& name)
             });
 }
 
+// Embind has no built-in set binding. Return copies so JS cannot mutate set keys.
 template<typename S>
-void bind_set(const std::string& name)
+void bind_set(const char* name)
 {
-    class_<S>(name.c_str())
-        .template smart_ptr<std::shared_ptr<S>>((name + "Handle").c_str())
+    class_<S>(name)
         .function("size", &S::size)
         .function(
             "has", +[](const S& values, const typename S::value_type& key) { return values.count(key) != 0; })
@@ -169,15 +141,33 @@ val mesh_with_warnings(F&& make_mesh)
 
 void bind_geometry()
 {
-    bind_map<std::map<double, CubicPoly>, borrow_value>("CubicProfile_s_to_poly");
-    bind_map<std::map<double, double>, copy_value>("CubicBezier2D_arclen_t");
-    bind_map<std::map<double, std::unique_ptr<RoadGeometry>>, borrow_value>("RefLine_s_to_geometry");
+    bind_reference_map<std::map<double, CubicPoly>>("CubicProfile_s_to_poly");
+    register_map<double, double>("CubicBezier2D_arclen_t");
+    using GeometryMap = std::map<double, std::unique_ptr<RoadGeometry>>;
+    class_<GeometryMap>("RefLine_s_to_geometry")
+        .function("size", &GeometryMap::size)
+        .function(
+            "get",
+            +[](GeometryMap& values, double s) -> RoadGeometry*
+            {
+                const auto it = values.find(s);
+                return it == values.end() ? nullptr : it->second.get();
+            },
+            return_value_policy::reference())
+        .function(
+            "keys",
+            +[](const GeometryMap& values)
+            {
+                val keys = val::array();
+                for (const auto& entry : values)
+                    keys.call<void>("push", entry.first);
+                return keys;
+            });
 
     enum_<ParamPoly3::PRange>("PRange").value("Normalized", ParamPoly3::PRange::Normalized).value("ArcLength", ParamPoly3::PRange::ArcLength);
     register_optional<ParamPoly3::PRange>();
 
     class_<CubicBounds>("CubicBounds")
-        .smart_ptr<std::shared_ptr<CubicBounds>>("CubicBoundsHandle")
         .property("min", &CubicBounds::min)
         .property("max", &CubicBounds::max)
         .property("d1_min", &CubicBounds::d1_min)
@@ -188,7 +178,6 @@ void bind_geometry()
         .constructor<>();
 
     class_<CubicPoly>("CubicPoly")
-        .smart_ptr<std::shared_ptr<CubicPoly>>("CubicPolyHandle")
         .property("a", &CubicPoly::a)
         .property("b", &CubicPoly::b)
         .property("c", &CubicPoly::c)
@@ -207,9 +196,8 @@ void bind_geometry()
         .function("set_zero", &CubicPoly::set_zero);
 
     class_<CubicProfile>("CubicProfile")
-        .smart_ptr<std::shared_ptr<CubicProfile>>("CubicProfileHandle")
         .property(
-            "s_to_poly", +[](const CubicProfile& self) { return borrow(&self.s_to_poly); })
+            "s_to_poly", static_cast<const std::map<double, CubicPoly> CubicProfile::*>(&CubicProfile::s_to_poly), return_value_policy::reference())
         .constructor<>()
         .function("evaluate", &CubicProfile::evaluate)
         .function("derivative", &CubicProfile::derivative)
@@ -219,11 +207,10 @@ void bind_geometry()
     register_optional<CubicPoly>();
 
     class_<CubicBezier2D>("CubicBezier2D")
-        .smart_ptr<std::shared_ptr<CubicBezier2D>>("CubicBezier2DHandle")
         .property("valid_length", &CubicBezier2D::valid_length)
         .property("control_points", &CubicBezier2D::control_points)
         .property(
-            "arclen_t", +[](const CubicBezier2D& self) { return borrow(&self.arclen_t); })
+            "arclen_t", static_cast<const std::map<double, double> CubicBezier2D::*>(&CubicBezier2D::arclen_t), return_value_policy::reference())
         .constructor<std::array<Vec2D, 4>>()
         .function("evaluate", &CubicBezier2D::evaluate)
         .function("derivative", &CubicBezier2D::derivative)
@@ -234,7 +221,6 @@ void bind_geometry()
         .class_function("get_coefficients", &CubicBezier2D::get_coefficients);
 
     class_<RoadGeometry>("RoadGeometry")
-        .smart_ptr<std::shared_ptr<RoadGeometry>>("RoadGeometryHandle")
         .property("s", &RoadGeometry::s)
         .property("x", &RoadGeometry::x)
         .property("y", &RoadGeometry::y)
@@ -244,15 +230,11 @@ void bind_geometry()
         .function("derivative", &RoadGeometry::derivative)
         .function("clone", &RoadGeometry::clone);
 
-    class_<Line, base<RoadGeometry>>("Line").smart_ptr<std::shared_ptr<Line>>("LineHandle").constructor<double, double, double, double, double>();
+    class_<Line, base<RoadGeometry>>("Line").constructor<double, double, double, double, double>();
 
-    class_<Arc, base<RoadGeometry>>("Arc")
-        .smart_ptr<std::shared_ptr<Arc>>("ArcHandle")
-        .property("curvature", &Arc::curvature)
-        .constructor<double, double, double, double, double, double>();
+    class_<Arc, base<RoadGeometry>>("Arc").property("curvature", &Arc::curvature).constructor<double, double, double, double, double, double>();
 
     class_<Spiral, base<RoadGeometry>>("Spiral")
-        .smart_ptr<std::shared_ptr<Spiral>>("SpiralHandle")
         .property("curv_start", &Spiral::curv_start)
         .property("curv_end", &Spiral::curv_end)
         .property("spiral_s_start", &Spiral::spiral_s_start)
@@ -261,7 +243,6 @@ void bind_geometry()
         .constructor<double, double, double, double, double, double, double>();
 
     class_<ParamPoly3, base<RoadGeometry>>("ParamPoly3")
-        .smart_ptr<std::shared_ptr<ParamPoly3>>("ParamPoly3Handle")
         .property("aU", &ParamPoly3::aU)
         .property("bU", &ParamPoly3::bU)
         .property("cU", &ParamPoly3::cU)
@@ -271,44 +252,36 @@ void bind_geometry()
         .property("cV", &ParamPoly3::cV)
         .property("dV", &ParamPoly3::dV)
         .property("p_range", &ParamPoly3::p_range)
-        .property(
-            "cubic_bezier", +[](const ParamPoly3& self) { return borrow(&self.cubic_bezier); })
+        .property("cubic_bezier", static_cast<const CubicBezier2D ParamPoly3::*>(&ParamPoly3::cubic_bezier), return_value_policy::reference())
         .constructor<double, double, double, double, double, double, double, double, double, double, double, double, double>()
         .constructor<double, double, double, double, double, double, double, double, double, double, double, double, double, ParamPoly3::PRange>();
 
     class_<RefLine>("RefLine")
-        .smart_ptr<std::shared_ptr<RefLine>>("RefLineHandle")
         .property("length", &RefLine::length)
-        .property(
-            "elevation_profile", +[](const RefLine& self) { return borrow(&self.elevation_profile); })
-        .property(
-            "s_to_geometry", +[](const RefLine& self) { return borrow(&self.s_to_geometry); })
+        .property("elevation_profile", static_cast<const CubicProfile RefLine::*>(&RefLine::elevation_profile), return_value_policy::reference())
+        .property("s_to_geometry",
+                  static_cast<const std::map<double, std::unique_ptr<RoadGeometry>> RefLine::*>(&RefLine::s_to_geometry),
+                  return_value_policy::reference())
         .constructor<double>()
         .function("get_xyz", &RefLine::get_xyz)
         .function("derivative", &RefLine::derivative)
         .function("match", &RefLine::match)
-        .function(
-            "get_geometry", +[](RefLine& self, double s) { return borrow(self.get_geometry(s)); })
+        .function("get_geometry", select_overload<RoadGeometry*(double)>(&RefLine::get_geometry), return_value_policy::reference())
         .function(
             "set_geometry", +[](RefLine& self, const RoadGeometry& geometry) { self.s_to_geometry[geometry.s] = geometry.clone(); });
 }
 
 void bind_mesh()
 {
-    bind_vector<Vec3D, copy_value>("Mesh3D_vertices");
-    bind_vector<uint32_t, copy_value>("Mesh3D_indices");
-    bind_vector<Vec2D, copy_value>("Mesh3D_st_coordinates");
+    register_vector<Vec3D>("Mesh3D_vertices");
+    register_vector<uint32_t>("Mesh3D_indices");
+    register_vector<Vec2D>("Mesh3D_st_coordinates");
 
     class_<Mesh3D>("Mesh3D")
-        .smart_ptr<std::shared_ptr<Mesh3D>>("Mesh3DHandle")
-        .property(
-            "vertices", +[](const Mesh3D& self) { return borrow(&self.vertices); })
-        .property(
-            "indices", +[](const Mesh3D& self) { return borrow(&self.indices); })
-        .property(
-            "normals", +[](const Mesh3D& self) { return borrow(&self.normals); })
-        .property(
-            "st_coordinates", +[](const Mesh3D& self) { return borrow(&self.st_coordinates); })
+        .property("vertices", static_cast<const std::vector<Vec3D> Mesh3D::*>(&Mesh3D::vertices), return_value_policy::reference())
+        .property("indices", static_cast<const std::vector<uint32_t> Mesh3D::*>(&Mesh3D::indices), return_value_policy::reference())
+        .property("normals", static_cast<const std::vector<Vec3D> Mesh3D::*>(&Mesh3D::normals), return_value_policy::reference())
+        .property("st_coordinates", static_cast<const std::vector<Vec2D> Mesh3D::*>(&Mesh3D::st_coordinates), return_value_policy::reference())
         .constructor<>()
         .function("add_mesh", &Mesh3D::add_mesh)
         .function("get_obj", &Mesh3D::get_obj);
@@ -316,10 +289,9 @@ void bind_mesh()
 
 void bind_road_marks()
 {
-    bind_vector<RoadMarkLine, borrow_value>("RoadMarkType_lines");
+    bind_reference_vector<RoadMarkLine>("RoadMarkType_lines");
 
     class_<RoadMarkLine, base<OdrNode>>("RoadMarkLine")
-        .smart_ptr<std::shared_ptr<RoadMarkLine>>("RoadMarkLineHandle")
         .property("s_offset", &RoadMarkLine::s_offset)
         .property("t_offset", &RoadMarkLine::t_offset)
         .property("length", &RoadMarkLine::length)
@@ -330,15 +302,12 @@ void bind_road_marks()
         .constructor<double, double, double>();
 
     class_<RoadMarkType, base<OdrNode>>("RoadMarkType")
-        .smart_ptr<std::shared_ptr<RoadMarkType>>("RoadMarkTypeHandle")
         .property("name", &RoadMarkType::name)
         .property("width", &RoadMarkType::width)
-        .property(
-            "lines", +[](const RoadMarkType& self) { return borrow(&self.lines); })
+        .property("lines", static_cast<const std::vector<RoadMarkLine> RoadMarkType::*>(&RoadMarkType::lines), return_value_policy::reference())
         .constructor<const std::string&>();
 
     class_<RoadMark, base<OdrNode>>("RoadMark")
-        .smart_ptr<std::shared_ptr<RoadMark>>("RoadMarkHandle")
         .property("s_offset", &RoadMark::s_offset)
         .property("type", &RoadMark::type)
         .property("color", &RoadMark::color)
@@ -348,28 +317,29 @@ void bind_road_marks()
         .property("material", &RoadMark::material)
         .property("lane_change", &RoadMark::lane_change)
         .property(
-            "type_elem", +[](const RoadMark& self) { return borrow(self.type_elem); })
+            "type_elem",
+            +[](const RoadMark& self)
+            { return self.type_elem ? val(const_cast<RoadMarkType*>(&*self.type_elem), return_value_policy::reference()) : val::undefined(); })
         .constructor<double, const std::string&, const std::string&>()
         .class_property("StandardWidth", &RoadMark::StandardWidth)
         .class_property("BoldWidth", &RoadMark::BoldWidth);
 
     class_<SingleRoadMark>("SingleRoadMark")
-        .smart_ptr<std::shared_ptr<SingleRoadMark>>("SingleRoadMarkHandle")
         .property("s_start", &SingleRoadMark::s_start)
         .property("s_end", &SingleRoadMark::s_end)
         .property("t_offset", &SingleRoadMark::t_offset)
         .property("width", &SingleRoadMark::width)
         .property("type", &SingleRoadMark::type)
         .constructor<double, double, double, double, const std::string&>();
-    bind_vector<SingleRoadMark, borrow_value>("RoadMarkVector");
+    register_vector<SingleRoadMark>("RoadMarkVector");
 }
 
 void bind_objects()
 {
-    bind_vector<RoadObjectCorner, borrow_value>("RoadObjectOutline_outline");
-    bind_vector<RoadObjectRepeat, borrow_value>("RoadObject_repeats");
-    bind_vector<RoadObjectOutline, borrow_value>("RoadObject_outlines");
-    bind_vector<LaneValidity, borrow_value>("RoadObject_lane_validities");
+    bind_reference_vector<RoadObjectCorner>("RoadObjectOutline_outline");
+    bind_reference_vector<RoadObjectRepeat>("RoadObject_repeats");
+    bind_reference_vector<RoadObjectOutline>("RoadObject_outlines");
+    bind_reference_vector<LaneValidity>("RoadObject_lane_validities");
 
     enum_<RoadObject::Orientation>("Orientation")
         .value("None", RoadObject::Orientation::None)
@@ -384,13 +354,11 @@ void bind_objects()
     register_optional<RoadObjectCorner::Type>();
 
     class_<LaneValidity, base<OdrNode>>("LaneValidity")
-        .smart_ptr<std::shared_ptr<LaneValidity>>("LaneValidityHandle")
         .property("from_lane", &LaneValidity::from_lane)
         .property("to_lane", &LaneValidity::to_lane)
         .constructor<int, int>();
 
     class_<RoadObjectRepeat, base<OdrNode>>("RoadObjectRepeat")
-        .smart_ptr<std::shared_ptr<RoadObjectRepeat>>("RoadObjectRepeatHandle")
         .property("s", &RoadObjectRepeat::s)
         .property("length", &RoadObjectRepeat::length)
         .property("distance", &RoadObjectRepeat::distance)
@@ -405,7 +373,6 @@ void bind_objects()
         .constructor<double, double, double>();
 
     class_<RoadObjectCorner, base<OdrNode>>("RoadObjectCorner")
-        .smart_ptr<std::shared_ptr<RoadObjectCorner>>("RoadObjectCornerHandle")
         .property("pt", &RoadObjectCorner::pt)
         .property("height", &RoadObjectCorner::height)
         .property("type", &RoadObjectCorner::type)
@@ -413,18 +380,17 @@ void bind_objects()
         .constructor<Vec3D, double, RoadObjectCorner::Type>();
 
     class_<RoadObjectOutline, base<OdrNode>>("RoadObjectOutline")
-        .smart_ptr<std::shared_ptr<RoadObjectOutline>>("RoadObjectOutlineHandle")
         .property("id", &RoadObjectOutline::id)
         .property("fill_type", &RoadObjectOutline::fill_type)
         .property("lane_type", &RoadObjectOutline::lane_type)
         .property("outer", &RoadObjectOutline::outer)
         .property("closed", &RoadObjectOutline::closed)
-        .property(
-            "outline", +[](const RoadObjectOutline& self) { return borrow(&self.outline); })
+        .property("outline",
+                  static_cast<const std::vector<RoadObjectCorner> RoadObjectOutline::*>(&RoadObjectOutline::outline),
+                  return_value_policy::reference())
         .constructor<>();
 
     class_<RoadObject, base<OdrNode>>("RoadObject")
-        .smart_ptr<std::shared_ptr<RoadObject>>("RoadObjectHandle")
         .property("id", &RoadObject::id)
         .property("s", &RoadObject::s)
         .property("t", &RoadObject::t)
@@ -442,12 +408,12 @@ void bind_objects()
         .property("subtype", &RoadObject::subtype)
         .property("orientation", &RoadObject::orientation)
         .property("is_dynamic", &RoadObject::is_dynamic)
+        .property("repeats", static_cast<const std::vector<RoadObjectRepeat> RoadObject::*>(&RoadObject::repeats), return_value_policy::reference())
         .property(
-            "repeats", +[](const RoadObject& self) { return borrow(&self.repeats); })
-        .property(
-            "outlines", +[](const RoadObject& self) { return borrow(&self.outlines); })
-        .property(
-            "lane_validities", +[](const RoadObject& self) { return borrow(&self.lane_validities); })
+            "outlines", static_cast<const std::vector<RoadObjectOutline> RoadObject::*>(&RoadObject::outlines), return_value_policy::reference())
+        .property("lane_validities",
+                  static_cast<const std::vector<LaneValidity> RoadObject::*>(&RoadObject::lane_validities),
+                  return_value_policy::reference())
         .constructor<const std::string&>()
         .function(
             "get_mesh", +[](const RoadObject& self, double eps) { return self.get_mesh(eps); })
@@ -462,7 +428,6 @@ void bind_objects()
         .class_function("get_cube", &RoadObject::get_cube);
 
     class_<RoadSignal, base<OdrNode>>("RoadSignal")
-        .smart_ptr<std::shared_ptr<RoadSignal>>("RoadSignalHandle")
         .property("id", &RoadSignal::id)
         .property("road_id", &RoadSignal::road_id)
         .property("s", &RoadSignal::s)
@@ -482,8 +447,9 @@ void bind_objects()
         .property("unit", &RoadSignal::unit)
         .property("text", &RoadSignal::text)
         .property("country", &RoadSignal::country)
-        .property(
-            "lane_validities", +[](const RoadSignal& self) { return borrow(&self.lane_validities); })
+        .property("lane_validities",
+                  static_cast<const std::vector<LaneValidity> RoadSignal::*>(&RoadSignal::lane_validities),
+                  return_value_policy::reference())
         .constructor<const std::string&,
                      const std::string&,
                      double,
@@ -508,15 +474,15 @@ void bind_objects()
 
 void bind_roads()
 {
-    bind_map<std::map<double, Crossfall::Record>, borrow_value>("Crossfall_records");
-    bind_map<std::map<double, HeightOffset>, borrow_value>("Lane_s_to_height_offset");
-    bind_map<std::map<double, RoadMark>, borrow_value>("Lane_s_to_road_mark");
-    bind_map<std::map<int, Lane>, borrow_value>("LaneSection_id_to_lane");
-    bind_map<std::map<double, LaneSection>, borrow_value>("Road_s_to_lane_section");
-    bind_map<std::map<double, std::string>, copy_value>("Road_s_to_type");
-    bind_map<std::map<double, Speed>, borrow_value>("Road_s_to_speed");
-    bind_map<std::map<std::string, RoadObject>, borrow_value>("Road_id_to_object");
-    bind_map<std::map<std::string, RoadSignal>, borrow_value>("Road_id_to_signal");
+    bind_reference_map<std::map<double, Crossfall::Record>>("Crossfall_records");
+    bind_reference_map<std::map<double, HeightOffset>>("Lane_s_to_height_offset");
+    bind_reference_map<std::map<double, RoadMark>>("Lane_s_to_road_mark");
+    bind_reference_map<std::map<int, Lane>>("LaneSection_id_to_lane");
+    bind_reference_map<std::map<double, LaneSection>>("Road_s_to_lane_section");
+    register_map<double, std::string>("Road_s_to_type");
+    bind_reference_map<std::map<double, Speed>>("Road_s_to_speed");
+    bind_reference_map<std::map<std::string, RoadObject>>("Road_id_to_object");
+    bind_reference_map<std::map<std::string, RoadSignal>>("Road_id_to_signal");
 
     enum_<Crossfall::Side>("CrossfallSide")
         .value("Both", Crossfall::Side::Both)
@@ -534,54 +500,45 @@ void bind_roads()
     register_optional<Road::TrafficRule>();
 
     class_<Crossfall::Record>("CrossfallRecord")
-        .smart_ptr<std::shared_ptr<Crossfall::Record>>("CrossfallRecordHandle")
-        .property(
-            "poly", +[](const Crossfall::Record& self) { return borrow(&self.poly); })
+        .property("poly", static_cast<const CubicPoly Crossfall::Record::*>(&Crossfall::Record::poly), return_value_policy::reference())
         .property("side", &Crossfall::Record::side)
         .constructor<>();
 
     class_<Crossfall>("Crossfall")
-        .smart_ptr<std::shared_ptr<Crossfall>>("CrossfallHandle")
         .property(
-            "records", +[](const Crossfall& self) { return borrow(&self.records); })
+            "records", static_cast<const std::map<double, Crossfall::Record> Crossfall::*>(&Crossfall::records), return_value_policy::reference())
         .constructor<>()
         .function("get", &Crossfall::get);
 
     class_<RoadLink, base<OdrNode>>("RoadLink")
-        .smart_ptr<std::shared_ptr<RoadLink>>("RoadLinkHandle")
         .property("id", &RoadLink::id)
         .property("type", &RoadLink::type)
         .property("contact_point", &RoadLink::contact_point)
         .constructor<const std::string&, const std::string&, std::optional<RoadLink::ContactPoint>>();
 
     class_<Speed, base<OdrNode>>("Speed")
-        .smart_ptr<std::shared_ptr<Speed>>("SpeedHandle")
         .property("max", &Speed::max)
         .property("unit", &Speed::unit)
         .constructor<const std::string&, const std::string&>();
 
     class_<HeightOffset, base<OdrNode>>("HeightOffset")
-        .smart_ptr<std::shared_ptr<HeightOffset>>("HeightOffsetHandle")
         .property("s_offset", &HeightOffset::s_offset)
         .property("inner", &HeightOffset::inner)
         .property("outer", &HeightOffset::outer)
         .constructor<double, double, double>();
 
     class_<Lane, base<OdrNode>>("Lane")
-        .smart_ptr<std::shared_ptr<Lane>>("LaneHandle")
         .property("id", &Lane::id)
         .property("type", &Lane::type)
         .property("level", &Lane::level)
         .property("predecessor", &Lane::predecessor)
         .property("successor", &Lane::successor)
-        .property(
-            "lane_width", +[](const Lane& self) { return borrow(&self.lane_width); })
-        .property(
-            "outer_border", +[](const Lane& self) { return borrow(&self.outer_border); })
-        .property(
-            "s_to_height_offset", +[](const Lane& self) { return borrow(&self.s_to_height_offset); })
-        .property(
-            "s_to_road_mark", +[](const Lane& self) { return borrow(&self.s_to_road_mark); })
+        .property("lane_width", static_cast<const CubicProfile Lane::*>(&Lane::lane_width), return_value_policy::reference())
+        .property("outer_border", static_cast<const CubicProfile Lane::*>(&Lane::outer_border), return_value_policy::reference())
+        .property("s_to_height_offset",
+                  static_cast<const std::map<double, HeightOffset> Lane::*>(&Lane::s_to_height_offset),
+                  return_value_policy::reference())
+        .property("s_to_road_mark", static_cast<const std::map<double, RoadMark> Lane::*>(&Lane::s_to_road_mark), return_value_policy::reference())
         .constructor<int>()
         .constructor<int, std::optional<std::string>, std::optional<bool>>()
         .function("get_roadmarks", &Lane::get_roadmarks)
@@ -606,48 +563,40 @@ void bind_roads()
         .function("get_roadmark_mesh", &Lane::get_roadmark_mesh);
 
     class_<LaneSection, base<OdrNode>>("LaneSection")
-        .smart_ptr<std::shared_ptr<LaneSection>>("LaneSectionHandle")
         .property("s", &LaneSection::s)
-        .property(
-            "id_to_lane", +[](const LaneSection& self) { return borrow(&self.id_to_lane); })
+        .property("id_to_lane", static_cast<const std::map<int, Lane> LaneSection::*>(&LaneSection::id_to_lane), return_value_policy::reference())
         .constructor<double>()
         .function("get_end", &LaneSection::get_end)
         .function("get_length", &LaneSection::get_length)
         .function("get_lane_id", &LaneSection::get_lane_id);
 
     class_<Road, base<OdrNode>>("Road")
-        .smart_ptr<std::shared_ptr<Road>>("RoadHandle")
         .property("id", &Road::id)
         .property("length", &Road::length)
         .property("junction", &Road::junction)
         .property("traffic_rule", &Road::traffic_rule)
         .property("name", &Road::name)
         .property(
-            "predecessor", +[](const Road& self) { return borrow(self.predecessor); })
+            "predecessor",
+            +[](const Road& self)
+            { return self.predecessor ? val(const_cast<RoadLink*>(&*self.predecessor), return_value_policy::reference()) : val::undefined(); })
         .property(
-            "successor", +[](const Road& self) { return borrow(self.successor); })
+            "successor",
+            +[](const Road& self)
+            { return self.successor ? val(const_cast<RoadLink*>(&*self.successor), return_value_policy::reference()) : val::undefined(); })
+        .property("lane_offset", static_cast<const CubicProfile Road::*>(&Road::lane_offset), return_value_policy::reference())
+        .property("superelevation", static_cast<const CubicProfile Road::*>(&Road::superelevation), return_value_policy::reference())
+        .property("crossfall", static_cast<const Crossfall Road::*>(&Road::crossfall), return_value_policy::reference())
+        .property("ref_line", static_cast<const RefLine Road::*>(&Road::ref_line), return_value_policy::reference())
         .property(
-            "lane_offset", +[](const Road& self) { return borrow(&self.lane_offset); })
-        .property(
-            "superelevation", +[](const Road& self) { return borrow(&self.superelevation); })
-        .property(
-            "crossfall", +[](const Road& self) { return borrow(&self.crossfall); })
-        .property(
-            "ref_line", +[](const Road& self) { return borrow(&self.ref_line); })
-        .property(
-            "s_to_lane_section", +[](const Road& self) { return borrow(&self.s_to_lane_section); })
-        .property(
-            "s_to_type", +[](const Road& self) { return borrow(&self.s_to_type); })
-        .property(
-            "s_to_speed", +[](const Road& self) { return borrow(&self.s_to_speed); })
-        .property(
-            "id_to_object", +[](const Road& self) { return borrow(&self.id_to_object); })
-        .property(
-            "id_to_signal", +[](const Road& self) { return borrow(&self.id_to_signal); })
+            "s_to_lane_section", static_cast<const std::map<double, LaneSection> Road::*>(&Road::s_to_lane_section), return_value_policy::reference())
+        .property("s_to_type", static_cast<const std::map<double, std::string> Road::*>(&Road::s_to_type), return_value_policy::reference())
+        .property("s_to_speed", static_cast<const std::map<double, Speed> Road::*>(&Road::s_to_speed), return_value_policy::reference())
+        .property("id_to_object", static_cast<const std::map<std::string, RoadObject> Road::*>(&Road::id_to_object), return_value_policy::reference())
+        .property("id_to_signal", static_cast<const std::map<std::string, RoadSignal> Road::*>(&Road::id_to_signal), return_value_policy::reference())
         .constructor<const std::string&, double, const std::string&>()
         .constructor<const std::string&, double, const std::string&, std::optional<Road::TrafficRule>, std::optional<std::string>>()
-        .function(
-            "get_lane_section", +[](Road& self, double s) { return borrow(self.get_lane_section(s)); })
+        .function("get_lane_section", select_overload<LaneSection*(double)>(&Road::get_lane_section), return_value_policy::reference())
         .function(
             "get_xyz", +[](const Road& self, double s, double t, double h) { return self.get_xyz(s, t, h); })
         .function(
@@ -675,10 +624,10 @@ void bind_roads()
 
 void bind_junctions()
 {
-    bind_vector<JunctionLaneLink, borrow_value>("JunctionConnection_lane_links");
-    bind_map<std::map<std::string, JunctionConnection>, borrow_value>("Junction_id_to_connection");
-    bind_map<std::map<std::string, JunctionController>, borrow_value>("Junction_id_to_controller");
-    bind_vector<JunctionPriority, borrow_value>("Junction_priorities");
+    bind_reference_vector<JunctionLaneLink>("JunctionConnection_lane_links");
+    bind_reference_map<std::map<std::string, JunctionConnection>>("Junction_id_to_connection");
+    bind_reference_map<std::map<std::string, JunctionController>>("Junction_id_to_controller");
+    bind_reference_vector<JunctionPriority>("Junction_priorities");
 
     enum_<JunctionConnection::ContactPoint>("JunctionContactPoint")
         .value("None", JunctionConnection::ContactPoint::None)
@@ -687,44 +636,41 @@ void bind_junctions()
     register_optional<JunctionConnection::ContactPoint>();
 
     class_<JunctionLaneLink, base<OdrNode>>("JunctionLaneLink")
-        .smart_ptr<std::shared_ptr<JunctionLaneLink>>("JunctionLaneLinkHandle")
         .property("from", &JunctionLaneLink::from)
         .property("to", &JunctionLaneLink::to)
         .constructor<int, int>();
 
     class_<JunctionConnection, base<OdrNode>>("JunctionConnection")
-        .smart_ptr<std::shared_ptr<JunctionConnection>>("JunctionConnectionHandle")
         .property("id", &JunctionConnection::id)
         .property("incoming_road", &JunctionConnection::incoming_road)
         .property("connecting_road", &JunctionConnection::connecting_road)
         .property("contact_point", &JunctionConnection::contact_point)
-        .property(
-            "lane_links", +[](const JunctionConnection& self) { return borrow(&self.lane_links); })
+        .property("lane_links",
+                  static_cast<const std::vector<JunctionLaneLink> JunctionConnection::*>(&JunctionConnection::lane_links),
+                  return_value_policy::reference())
         .constructor<const std::string&, const std::string&, const std::string&, const std::string&>();
 
     class_<JunctionPriority, base<OdrNode>>("JunctionPriority")
-        .smart_ptr<std::shared_ptr<JunctionPriority>>("JunctionPriorityHandle")
         .property("high", &JunctionPriority::high)
         .property("low", &JunctionPriority::low)
         .constructor<const std::string&, const std::string&>();
 
     class_<JunctionController, base<OdrNode>>("JunctionController")
-        .smart_ptr<std::shared_ptr<JunctionController>>("JunctionControllerHandle")
         .property("id", &JunctionController::id)
         .property("type", &JunctionController::type)
         .property("sequence", &JunctionController::sequence)
         .constructor<const std::string&>();
 
     class_<Junction, base<OdrNode>>("Junction")
-        .smart_ptr<std::shared_ptr<Junction>>("JunctionHandle")
         .property("id", &Junction::id)
         .property("name", &Junction::name)
-        .property(
-            "id_to_connection", +[](const Junction& self) { return borrow(&self.id_to_connection); })
-        .property(
-            "id_to_controller", +[](const Junction& self) { return borrow(&self.id_to_controller); })
-        .property(
-            "priorities", +[](const Junction& self) { return borrow(&self.priorities); })
+        .property("id_to_connection",
+                  static_cast<const std::map<std::string, JunctionConnection> Junction::*>(&Junction::id_to_connection),
+                  return_value_policy::reference())
+        .property("id_to_controller",
+                  static_cast<const std::map<std::string, JunctionController> Junction::*>(&Junction::id_to_controller),
+                  return_value_policy::reference())
+        .property("priorities", static_cast<const std::vector<JunctionPriority> Junction::*>(&Junction::priorities), return_value_policy::reference())
         .constructor<const std::string&>();
 }
 
@@ -732,10 +678,9 @@ void bind_routing()
 {
     bind_set<std::unordered_set<RoutingGraphEdge>>("RoutingGraph_edges");
     bind_set<std::unordered_set<WeightedLaneKey>>("RoutingGraph_lane_key_to_successors_value");
-    bind_map<std::unordered_map<LaneKey, std::unordered_set<WeightedLaneKey>>, borrow_value>("RoutingGraph_lane_key_to_successors");
+    bind_reference_map<std::unordered_map<LaneKey, std::unordered_set<WeightedLaneKey>>>("RoutingGraph_lane_key_to_successors");
 
     class_<LaneKey>("LaneKey")
-        .smart_ptr<std::shared_ptr<LaneKey>>("LaneKeyHandle")
         .property("road_id", &LaneKey::road_id)
         .property("lane_section_s", &LaneKey::lane_section_s)
         .property("lane_id", &LaneKey::lane_id)
@@ -743,29 +688,28 @@ void bind_routing()
         .function("to_string", &LaneKey::to_string);
 
     class_<WeightedLaneKey, base<LaneKey>>("WeightedLaneKey")
-        .smart_ptr<std::shared_ptr<WeightedLaneKey>>("WeightedLaneKeyHandle")
         .property("weight", &WeightedLaneKey::weight)
         .constructor<const LaneKey&, double>()
         .constructor<const std::string&, double, int, double>();
 
     class_<RoutingGraphEdge>("RoutingGraphEdge")
-        .smart_ptr<std::shared_ptr<RoutingGraphEdge>>("RoutingGraphEdgeHandle")
-        .property(
-            "from", +[](const RoutingGraphEdge& self) { return borrow(&self.from); })
-        .property(
-            "to", +[](const RoutingGraphEdge& self) { return borrow(&self.to); })
+        .property("from", static_cast<const LaneKey RoutingGraphEdge::*>(&RoutingGraphEdge::from), return_value_policy::reference())
+        .property("to", static_cast<const LaneKey RoutingGraphEdge::*>(&RoutingGraphEdge::to), return_value_policy::reference())
         .property("weight", &RoutingGraphEdge::weight)
         .constructor<LaneKey, LaneKey, double>();
-    bind_vector<LaneKey, borrow_value>("RoutingPath");
+    register_vector<LaneKey>("RoutingPath");
 
     class_<RoutingGraph>("RoutingGraph")
-        .smart_ptr<std::shared_ptr<RoutingGraph>>("RoutingGraphHandle")
         .property(
-            "edges", +[](const RoutingGraph& self) { return borrow(&self.edges); })
-        .property(
-            "lane_key_to_successors", +[](const RoutingGraph& self) { return borrow(&self.lane_key_to_successors); })
-        .property(
-            "lane_key_to_predecessors", +[](const RoutingGraph& self) { return borrow(&self.lane_key_to_predecessors); })
+            "edges", static_cast<const std::unordered_set<RoutingGraphEdge> RoutingGraph::*>(&RoutingGraph::edges), return_value_policy::reference())
+        .property("lane_key_to_successors",
+                  static_cast<const std::unordered_map<LaneKey, std::unordered_set<WeightedLaneKey>> RoutingGraph::*>(
+                      &RoutingGraph::lane_key_to_successors),
+                  return_value_policy::reference())
+        .property("lane_key_to_predecessors",
+                  static_cast<const std::unordered_map<LaneKey, std::unordered_set<WeightedLaneKey>> RoutingGraph::*>(
+                      &RoutingGraph::lane_key_to_predecessors),
+                  return_value_policy::reference())
         .constructor<>()
         .function("add_edge", &RoutingGraph::add_edge)
         .function("get_lane_successors", &RoutingGraph::get_lane_successors)
@@ -776,14 +720,12 @@ void bind_routing()
 void bind_samplers()
 {
     class_<DerivativeBounds>("DerivativeBounds")
-        .smart_ptr<std::shared_ptr<DerivativeBounds>>("DerivativeBoundsHandle")
         .property("value", &DerivativeBounds::value)
         .property("d1", &DerivativeBounds::d1)
         .property("d2", &DerivativeBounds::d2)
         .constructor<>();
 
     class_<GeometryBounds>("GeometryBounds")
-        .smart_ptr<std::shared_ptr<GeometryBounds>>("GeometryBoundsHandle")
         .property("position_d1", &GeometryBounds::position_d1)
         .property("position_d2", &GeometryBounds::position_d2)
         .property("speed_lower", &GeometryBounds::speed_lower)
@@ -795,11 +737,7 @@ void bind_samplers()
         .property("frame_mapping_error", &GeometryBounds::frame_mapping_error)
         .constructor<>();
 
-    class_<EdgePoints>("EdgePoints")
-        .smart_ptr<std::shared_ptr<EdgePoints>>("EdgePointsHandle")
-        .property("inner", &EdgePoints::inner)
-        .property("outer", &EdgePoints::outer)
-        .constructor<>();
+    class_<EdgePoints>("EdgePoints").property("inner", &EdgePoints::inner).property("outer", &EdgePoints::outer).constructor<>();
 
     class_<RefLineSampler>("RefLineSampler")
         .constructor<const RefLine&>()
@@ -831,11 +769,10 @@ void bind_samplers()
 
 void bind_map()
 {
-    bind_map<std::map<std::string, Road>, borrow_value>("OpenDriveMap_id_to_road");
-    bind_map<std::map<std::string, Junction>, borrow_value>("OpenDriveMap_id_to_junction");
+    bind_reference_map<std::map<std::string, Road>>("OpenDriveMap_id_to_road");
+    bind_reference_map<std::map<std::string, Junction>>("OpenDriveMap_id_to_junction");
 
     class_<OpenDriveMapHeader, base<OdrNode>>("OpenDriveMapHeader")
-        .smart_ptr<std::shared_ptr<OpenDriveMapHeader>>("OpenDriveMapHeaderHandle")
         .property("rev_major", &OpenDriveMapHeader::rev_major)
         .property("rev_minor", &OpenDriveMapHeader::rev_minor)
         .property("north", &OpenDriveMapHeader::north)
@@ -850,13 +787,12 @@ void bind_map()
         .constructor<>();
 
     class_<OpenDriveMap>("OpenDriveMap")
-        .smart_ptr<std::shared_ptr<OpenDriveMap>>("OpenDriveMapHandle")
+        .property("header", static_cast<const OpenDriveMapHeader OpenDriveMap::*>(&OpenDriveMap::header), return_value_policy::reference())
         .property(
-            "header", +[](const OpenDriveMap& self) { return borrow(&self.header); })
-        .property(
-            "id_to_road", +[](const OpenDriveMap& self) { return borrow(&self.id_to_road); })
-        .property(
-            "id_to_junction", +[](const OpenDriveMap& self) { return borrow(&self.id_to_junction); })
+            "id_to_road", static_cast<const std::map<std::string, Road> OpenDriveMap::*>(&OpenDriveMap::id_to_road), return_value_policy::reference())
+        .property("id_to_junction",
+                  static_cast<const std::map<std::string, Junction> OpenDriveMap::*>(&OpenDriveMap::id_to_junction),
+                  return_value_policy::reference())
         .constructor<>()
         .function("reset", &OpenDriveMap::reset)
         .function("set_node_parents", &OpenDriveMap::set_node_parents)
@@ -902,13 +838,12 @@ EMSCRIPTEN_BINDINGS(libOpenDRIVE)
         .element(emscripten::index<1>())
         .element(emscripten::index<2>())
         .element(emscripten::index<3>());
+    register_vector<double>("DoubleVector");
     bind_set<std::set<double>>("DoubleSet");
 
     class_<OdrNode>("OdrNode")
-        .smart_ptr<std::shared_ptr<OdrNode>>("OdrNodeHandle")
         .property("xml_offset", &OdrNode::xml_offset)
-        .function(
-            "parent", +[](OdrNode& self) { return borrow(self.parent()); })
+        .function("parent", select_overload<OdrNode*()>(&OdrNode::parent), return_value_policy::reference())
         .function("set_parent", &OdrNode::set_parent, allow_raw_pointers());
     bind_geometry();
     bind_mesh();
