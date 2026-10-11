@@ -7,11 +7,6 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 option(OPENDRIVE_BUILD_TESTS "Build OpenDrive tests" OFF)
-option(OPENDRIVE_BUILD_WASM "Build the JavaScript/WebAssembly module" OFF)
-
-if(OPENDRIVE_BUILD_WASM AND NOT EMSCRIPTEN)
-    message(FATAL_ERROR "OPENDRIVE_BUILD_WASM requires Emscripten; configure with emcmake cmake")
-endif()
 
 find_package(pugixml QUIET CONFIG)
 if(NOT TARGET pugixml::pugixml)
@@ -109,8 +104,13 @@ target_include_directories(
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
-if(OPENDRIVE_BUILD_WASM)
-    add_subdirectory(wasm)
+if(EMSCRIPTEN)
+    target_compile_options(OpenDrive PUBLIC -fexceptions)
+    add_executable(OpenDriveWasm wasm/Embind.cpp)
+    target_link_libraries(OpenDriveWasm PRIVATE OpenDrive::OpenDrive)
+    target_compile_features(OpenDriveWasm PRIVATE cxx_std_17)
+    set_target_properties(OpenDriveWasm PROPERTIES OUTPUT_NAME libOpenDRIVE SUFFIX ".mjs")
+    target_link_options(OpenDriveWasm PRIVATE --bind -fexceptions -sMODULARIZE=1 -sALLOW_MEMORY_GROWTH=1)
 endif()
 
 if(OPENDRIVE_BUILD_TESTS)

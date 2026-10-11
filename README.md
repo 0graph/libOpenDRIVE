@@ -64,13 +64,11 @@ cmake -DBUILD_SHARED_LIBS=ON ..
 Build the separate Embind module with an activated [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html):
 
 ```bash
-emcmake cmake -S . -B build/wasm -G Ninja -DCMAKE_BUILD_TYPE=Release -DOPENDRIVE_BUILD_WASM=ON
+emcmake cmake -S . -B build/wasm -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/wasm --parallel
-node wasm/smoke.mjs build/wasm/wasm/libOpenDRIVE.mjs
 ```
 
-The output is `build/wasm/wasm/libOpenDRIVE.mjs` and `libOpenDRIVE.wasm`.
-See [the JavaScript API guide](wasm/README.md) for browser/Node usage, exposed types, and object lifetimes.
+The output is `build/wasm/libOpenDRIVE.mjs` and `libOpenDRIVE.wasm`.
 
 ## Viewer
 Check out the viewer at [odrviewer.io](https://odrviewer.io) which uses this library. Use the [odrviewer project](https://github.com/pageldev/odrviewer) to post issues and feature requests for odrviewer.io.
