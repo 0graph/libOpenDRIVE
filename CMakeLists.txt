@@ -7,6 +7,11 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 option(OPENDRIVE_BUILD_TESTS "Build OpenDrive tests" OFF)
+option(OPENDRIVE_BUILD_WASM "Build the JavaScript/WebAssembly module" OFF)
+
+if(OPENDRIVE_BUILD_WASM AND NOT EMSCRIPTEN)
+    message(FATAL_ERROR "OPENDRIVE_BUILD_WASM requires Emscripten; configure with emcmake cmake")
+endif()
 
 find_package(pugixml QUIET CONFIG)
 if(NOT TARGET pugixml::pugixml)
@@ -103,6 +108,10 @@ target_include_directories(
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
+
+if(OPENDRIVE_BUILD_WASM)
+    add_subdirectory(wasm)
+endif()
 
 if(OPENDRIVE_BUILD_TESTS)
     include(CTest)

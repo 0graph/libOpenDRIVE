@@ -3,6 +3,34 @@ name: CI
 on: [push, pull_request]
 
 jobs:
+  wasm-build:
+    name: emscripten-wasm
+    runs-on: ubuntu-22.04
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v4
+      - name: setup Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.6
+      - name: setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: configure
+        run: emcmake cmake -S . -B build/wasm -G Ninja -DCMAKE_BUILD_TYPE=Release -DOPENDRIVE_BUILD_WASM=ON
+      - name: build
+        run: cmake --build build/wasm --parallel 2
+      - name: test JavaScript API
+        run: node wasm/smoke.mjs build/wasm/wasm/libOpenDRIVE.mjs
+      - name: upload module
+        uses: actions/upload-artifact@v4
+        with:
+          name: libOpenDRIVE-wasm
+          path: |
+            build/wasm/wasm/libOpenDRIVE.mjs
+            build/wasm/wasm/libOpenDRIVE.wasm
+          if-no-files-found: error
   build-linux:
     name: ubuntu-22.04-release
     runs-on: ubuntu-22.04

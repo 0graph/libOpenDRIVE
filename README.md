@@ -59,7 +59,20 @@ If requiring a shared library, use:
 cmake -DBUILD_SHARED_LIBS=ON ..
 ```
 
+## WebAssembly
+
+Build the separate Embind module with an activated [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html):
+
+```bash
+emcmake cmake -S . -B build/wasm -G Ninja -DCMAKE_BUILD_TYPE=Release -DOPENDRIVE_BUILD_WASM=ON
+cmake --build build/wasm --parallel
+node wasm/smoke.mjs build/wasm/wasm/libOpenDRIVE.mjs
+```
+
+The output is `build/wasm/wasm/libOpenDRIVE.mjs` and `libOpenDRIVE.wasm`.
+See [the JavaScript API guide](wasm/README.md) for browser/Node usage, exposed types, and object lifetimes.
+
 ## Viewer
 Check out the viewer at [odrviewer.io](https://odrviewer.io) which uses this library. Use the [odrviewer project](https://github.com/pageldev/odrviewer) to post issues and feature requests for odrviewer.io.
 
-<sub>Info: The Viewer and WebAssembly bindings are no longer part of this project. This is to focus more on the library functionality and avoid having to keep the bindings up-to-date. Use [v0.3.0](https://github.com/pageldev/libOpenDRIVE/releases/tag/0.3.0) to get the last version that still includes Viewer and WebAssembly bindings. </sub>
+<sub>The viewer is maintained separately; the WebAssembly bindings in this repository target the V1.0 API.</sub>
