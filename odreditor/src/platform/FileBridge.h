@@ -8,6 +8,7 @@ struct OpenedFile
 {
     std::string Name;
     std::string Bytes;
+    std::string Error = {};
 };
 void                      InitializeFileBridge();
 void                      ChooseFile();

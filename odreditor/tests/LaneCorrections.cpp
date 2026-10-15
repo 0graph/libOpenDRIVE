@@ -285,17 +285,120 @@ void ScopedMovesAndAmbiguity()
           "Pre-gapped compaction changed the other side");
 }
 
+void InsertedIdentitySafety()
+{
+    for (const int sign : {-1, 1})
+    {
+        const std::string side = sign < 0 ? "right" : "left";
+        XodrDocument      doc;
+        Commands          commands(doc);
+        Require(doc.LoadDocument(
+            "<OpenDRIVE>" +
+            Road("R",
+                 Section(0, side, Lane(sign, "<link><successor id='" + std::to_string(sign * 2) + "'/></link>")) + Section(10, side, Lane(sign))) +
+            "</OpenDRIVE>"));
+        const auto parent = Id(doc, "/OpenDRIVE/road/lanes/laneSection[@s='10']/" + side);
+        NodeId     selection = Id(doc, "/OpenDRIVE/road/lanes/laneSection[@s='10']/" + side + "/lane");
+        const auto original = doc.SaveDocument();
+        Check(!commands.InsertLane(parent, 1, selection) && doc.SaveDocument() == original, "Insertion resolved a dangling lane reference");
+        Check(!commands.Duplicate(selection, selection) && doc.SaveDocument() == original, "Duplication resolved a dangling lane reference");
+    }
+    XodrDocument doc;
+    Commands     commands(doc);
+    Require(doc.LoadDocument(
+        "<OpenDRIVE>" +
+        Road("R", Section(0, "right", Lane(-1)), {}, "<signals><signal id='S' s='0'><validity fromLane='-3' toLane='-1'/></signal></signals>") +
+        "</OpenDRIVE>"));
+    NodeId     selection = Id(doc, "/OpenDRIVE/road/lanes/laneSection/right/lane");
+    const auto original = doc.SaveDocument();
+    Check(!commands.InsertLane(Id(doc, "/OpenDRIVE/road/lanes/laneSection/right"), 1, selection) && doc.SaveDocument() == original,
+          "Insertion silently expanded validity membership");
+}
+
+void RepeatedLinksAndExtensions()
+{
+    XodrDocument doc;
+    Commands     commands(doc);
+    Require(doc.LoadDocument("<OpenDRIVE>" +
+                             Road("A",
+                                  Section(0, "right", Lane(-1, "<link><successor id='-1'/><successor id='-2'/></link>")),
+                                  "<successor elementType='road' elementId='B' contactPoint='start'/>") +
+                             Road("B", Section(0, "right", Lane(-1) + Lane(-2))) +
+                             "<vendor><laneSection><right><lane id='vendor'/></right></laneSection></vendor></OpenDRIVE>"));
+    NodeId selection = Id(doc, "/OpenDRIVE/road[@id='B']/lanes/laneSection/right/lane[@id='-1']");
+    Require(commands.Delete(selection, selection));
+    auto link = Find(doc, "/OpenDRIVE/road[@id='A']/lanes/laneSection/right/lane/link/successor");
+    Check(link && !link.next_sibling() && std::string(link.attribute("id").value()) == "-1", "Repeated lane references were skipped");
+    Require(commands.Insert(Id(doc, "/OpenDRIVE/vendor/laneSection/right"), "lane", selection));
+    Check(!doc.GetNode(selection).attribute("id") && Find(doc, "/OpenDRIVE/vendor/laneSection/right/lane[@id='vendor']"),
+          "Vendor elements received lane semantics");
+    Require(doc.LoadDocument(
+        "<OpenDRIVE>" +
+        Road("A",
+             Section(0, "right", Lane(-1, "<link><successor id='-2'/></link>")),
+             "<successor elementType='road' elementId='B' contactPoint='start'/><successor elementType='road' elementId='C' contactPoint='start'/>") +
+        Road("B", Section(0, "right", Lane(-1) + Lane(-2))) + Road("C", Section(0, "right", Lane(-1) + Lane(-2))) + "</OpenDRIVE>"));
+    selection = Id(doc, "/OpenDRIVE/road[@id='C']/lanes/laneSection/right/lane[@id='-1']");
+    const auto original = doc.SaveDocument();
+    Check(!commands.Delete(selection, selection) && doc.SaveDocument() == original, "Ambiguous alternative road target was ignored");
+}
+
+void OtherIdentityScopes()
+{
+    XodrDocument doc;
+    Commands     commands(doc);
+    Require(doc.LoadDocument(
+        "<OpenDRIVE><road id='R' junction='J'><link><successor elementType='junction' elementId='J'/></link><objects><object "
+        "id='O'><outlines><outline id='1'><cornerLocal id='1'/></outline></outlines><markings><marking outlineId='1'><cornerReference "
+        "id='1'/></marking></markings></object><object id='P'><outlines><outline id='1'><cornerLocal id='1'/></outline></outlines><markings><marking "
+        "outlineId='1'><cornerReference id='1'/></marking></markings></object><objectReference id='O'/></objects></road><junction id='J'><controller "
+        "id='T'/></junction><controller id='T'/></OpenDRIVE>"));
+    NodeId selection = Id(doc, "/OpenDRIVE/road/objects/object[@id='O']/outlines/outline");
+    Require(commands.RenameIds({{selection, "2"}}, selection));
+    Check(std::string(Find(doc, "/OpenDRIVE/road/objects/object[@id='O']/markings/marking").attribute("outlineId").value()) == "2",
+          "Outline reference scope failed");
+    selection = Id(doc, "/OpenDRIVE/road/objects/object[@id='O']/outlines/outline/cornerLocal");
+    Require(commands.RenameIds({{selection, "3"}}, selection));
+    Check(std::string(Find(doc, "/OpenDRIVE/road/objects/object[@id='O']/markings/marking/cornerReference").attribute("id").value()) == "3",
+          "Corner reference scope failed");
+    Check(std::string(Find(doc, "/OpenDRIVE/road/objects/object[@id='P']/markings/marking/cornerReference").attribute("id").value()) == "1",
+          "Corner rename escaped its outline scope");
+    Require(commands.Delete(selection, selection));
+    Check(!Find(doc, "/OpenDRIVE/road/objects/object[@id='O']/markings/marking/cornerReference"), "Deleted corner reference remained");
+    selection = Id(doc, "/OpenDRIVE/road/objects/object[@id='O']");
+    Require(commands.RenameIds({{selection, "renamed"}}, selection));
+    Check(std::string(Find(doc, "/OpenDRIVE/road/objects/objectReference").attribute("id").value()) == "renamed", "Object reference rename failed");
+    selection = Id(doc, "/OpenDRIVE/controller");
+    Require(commands.RenameIds({{selection, "controller"}}, selection));
+    Check(std::string(Find(doc, "/OpenDRIVE/junction/controller").attribute("id").value()) == "controller", "Controller rename failed");
+    Require(commands.Delete(selection, selection));
+    Check(!Find(doc, "/OpenDRIVE/junction/controller"), "Controller cleanup failed");
+    selection = Id(doc, "/OpenDRIVE/junction");
+    Require(commands.RenameIds({{selection, "renamed"}}, selection));
+    Check(std::string(Find(doc, "/OpenDRIVE/road").attribute("junction").value()) == "renamed", "Junction membership rename failed");
+    Require(commands.Delete(selection, selection));
+    Check(std::string(Find(doc, "/OpenDRIVE/road").attribute("junction").value()) == "-1" && !Find(doc, "/OpenDRIVE/road/link/successor"),
+          "Junction cleanup failed");
+}
+
 } // namespace
 int main()
 {
     try
     {
+        for (const auto* value : {"1", "01", " +01 ", "\t1\n"})
+            Check(ReferenceIndex::LaneNumber(value) == 1, "XML integer lexical form lost identity");
+        Check(ReferenceIndex::Number(" +1.5e+2 ") == 150.0 && !ReferenceIndex::Number("+-1") && !ReferenceIndex::Number("inf"),
+              "XML position parsing failed");
         SectionCompaction();
         RoadContactPoints();
         JunctionScopes();
         Validities();
         IdentitiesAndFailures();
         ScopedMovesAndAmbiguity();
+        OtherIdentityScopes();
+        InsertedIdentitySafety();
+        RepeatedLinksAndExtensions();
         std::cout << "Lane and reference correction families passed\n";
     }
     catch (const std::exception& error)

@@ -20,6 +20,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE void ReceiveText(const char* text)
         ImGui::GetIO().AddInputCharactersUTF8(text);
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE void ReceiveFileError(const char* error)
+{
+    PendingFile = odreditor::OpenedFile{"", "", error};
+}
+
 namespace odreditor
 {
 void InitializeFileBridge()

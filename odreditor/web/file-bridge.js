@@ -1,14 +1,21 @@
 Module.initializeFileBridge = function() {
     const input = document.getElementById('file-input');
+    let generation = 0;
     async function open(file) {
         if (!file) return;
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        const pointer = Module._malloc(bytes.length || 1);
+        const request = ++generation;
         try {
-            HEAPU8.set(bytes, pointer);
-            Module.ccall('ReceiveFile', null, ['string', 'number', 'number'], [file.name, pointer, bytes.length]);
-        } finally {
-            Module._free(pointer);
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            if (request !== generation) return;
+            const pointer = Module._malloc(bytes.length || 1);
+            try {
+                HEAPU8.set(bytes, pointer);
+                Module.ccall('ReceiveFile', null, ['string', 'number', 'number'], [file.name, pointer, bytes.length]);
+            } finally {
+                Module._free(pointer);
+            }
+        } catch (error) {
+            if (request === generation) Module.ccall('ReceiveFileError', null, ['string'], ['Could not read file']);
         }
         Module.canvas.focus();
     }

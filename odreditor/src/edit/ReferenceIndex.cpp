@@ -20,6 +20,20 @@ bool RoadChild(pugi::xml_node node, const char* group)
 {
     return Named(node.parent(), group) && Named(node.parent().parent(), "road") && RootChild(node.parent().parent());
 }
+std::string_view NumericToken(const std::string& text)
+{
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+        return {};
+    std::string_view token(text.data() + first, text.find_last_not_of(" \t\r\n") - first + 1);
+    if (token.front() == '+')
+    {
+        token.remove_prefix(1);
+        if (token.empty() || token.front() == '+' || token.front() == '-')
+            return {};
+    }
+    return token;
+}
 void Append(std::vector<NodeId>& into, const std::vector<NodeId>& from)
 {
     for (auto id : from)
@@ -62,17 +76,23 @@ EntityKind GetEntityKind(pugi::xml_node node)
 }
 std::optional<int> ReferenceIndex::LaneNumber(const std::string& text)
 {
-    int  value = 0;
-    auto result = std::from_chars(text.data(), text.data() + text.size(), value);
-    if (result.ec != std::errc{} || result.ptr != text.data() + text.size())
+    int        value = 0;
+    const auto token = NumericToken(text);
+    if (token.empty())
+        return {};
+    auto result = std::from_chars(token.data(), token.data() + token.size(), value);
+    if (result.ec != std::errc{} || result.ptr != token.data() + token.size())
         return {};
     return value;
 }
 std::optional<double> ReferenceIndex::Number(const std::string& text)
 {
-    double value = 0;
-    auto   result = std::from_chars(text.data(), text.data() + text.size(), value);
-    if (result.ec != std::errc{} || result.ptr != text.data() + text.size() || !std::isfinite(value))
+    double     value = 0;
+    const auto token = NumericToken(text);
+    if (token.empty())
+        return {};
+    auto result = std::from_chars(token.data(), token.data() + token.size(), value);
+    if (result.ec != std::errc{} || result.ptr != token.data() + token.size() || !std::isfinite(value))
         return {};
     return value;
 }
@@ -221,17 +241,36 @@ Resolution ReferenceIndex::GetJunctionLane(NodeId connectionId, const std::strin
         result.Error = "Direct junction lane references need raw XML";
     return result;
 }
-Resolution ReferenceIndex::GetLinkedLane(NodeId laneId, bool predecessor) const
+Resolution ReferenceIndex::GetLinkedLane(NodeId laneId, bool predecessor, pugi::xml_node specificLink) const
 {
     auto        lane = Document.GetNode(laneId);
     const auto* field = predecessor ? "predecessor" : "successor";
-    auto        link = lane.child("link").child(field);
+    if (!specificLink)
+    {
+        Resolution result;
+        for (auto child : lane.child("link").children(field))
+        {
+            const auto resolved = GetLinkedLane(laneId, predecessor, child);
+            Append(result.Targets, resolved.Targets);
+            Append(result.Scopes, resolved.Scopes);
+            if (!resolved.Error.empty())
+                result.Error = resolved.Error;
+        }
+        return result;
+    }
+    auto link = specificLink ? specificLink : lane.child("link").child(field);
     if (!link)
         return {};
     std::string error;
     auto        sections = GetSections(GetRoad(laneId), error);
-    const auto  sectionId = Document.GetId(lane.parent().parent());
-    auto        section = std::find(sections.begin(), sections.end(), sectionId);
+    if (!error.empty())
+    {
+        auto result = Find(EntityKind::Lane, link.attribute("id").value(), sections);
+        result.Error = error;
+        return result;
+    }
+    const auto sectionId = Document.GetId(lane.parent().parent());
+    auto       section = std::find(sections.begin(), sections.end(), sectionId);
     if (section == sections.end())
         return {{}, {}, "Lane section is missing"};
     if ((predecessor && section != sections.begin()) || (!predecessor && section + 1 != sections.end()))
@@ -240,8 +279,28 @@ Resolution ReferenceIndex::GetLinkedLane(NodeId laneId, bool predecessor) const
         result.Error = error;
         return result;
     }
-    auto              road = Document.GetNode(GetRoad(laneId));
-    auto              roadLink = road.child("link").child(field);
+    auto road = Document.GetNode(GetRoad(laneId));
+    auto roadLink = road.child("link").child(field);
+    if (roadLink.next_sibling(field))
+    {
+        std::vector<NodeId> candidates;
+        for (auto alternative : road.child("link").children(field))
+        {
+            std::vector<NodeId> roads;
+            if (std::string_view(alternative.attribute("elementType").value()) == "road")
+                roads = Find(EntityKind::Road, alternative.attribute("elementId").value(), {DocumentNode}).Targets;
+            else if (std::string_view(alternative.attribute("elementType").value()) == "junction")
+                for (auto junction : Find(EntityKind::Junction, alternative.attribute("elementId").value(), {DocumentNode}).Targets)
+                    for (auto connection : Document.GetNode(junction).children("connection"))
+                        for (const auto* attribute : {"incomingRoad", "connectingRoad", "linkedRoad"})
+                            Append(roads, Find(EntityKind::Road, connection.attribute(attribute).value(), {DocumentNode}).Targets);
+            for (auto target : roads)
+                Append(candidates, GetSections(target, error));
+        }
+        auto result = Find(EntityKind::Lane, link.attribute("id").value(), candidates);
+        result.Error = "Road link is ambiguous";
+        return result;
+    }
     const std::string type = roadLink.attribute("elementType").value();
     if (type == "road")
     {
@@ -305,14 +364,14 @@ ValidityScope ReferenceIndex::GetValidityScope(NodeId ownerId) const
     std::vector<std::pair<double, double>> spans;
     auto                                   start = Number(owner.attribute("s").value());
     auto length = owner.attribute("validLength") ? Number(owner.attribute("validLength").value()) : std::optional<double>(0);
-    if (!start || !length || *length < 0)
+    if (!start || !length || *length < 0 || !std::isfinite(*start + *length))
         result.Error = "Validity position or span is invalid";
     else
         spans.emplace_back(*start, *start + *length);
     for (auto repeat : owner.children("repeat"))
     {
         auto s = Number(repeat.attribute("s").value()), extent = Number(repeat.attribute("length").value());
-        if (!s || !extent || *extent < 0)
+        if (!s || !extent || *extent < 0 || !std::isfinite(*s + *extent))
             result.Error = "Validity repeat span is invalid";
         else
             spans.emplace_back(*s, *s + *extent);
@@ -388,8 +447,13 @@ void ReferenceIndex::BuildReferences()
         if (entity.Kind != EntityKind::Lane)
             continue;
         auto lane = Document.GetNode(entity.Id);
-        Add(Document.GetId(lane.child("link").child("predecessor")), "id", EntityKind::Lane, GetPredecessorLane(entity.Id));
-        Add(Document.GetId(lane.child("link").child("successor")), "id", EntityKind::Lane, GetSuccessorLane(entity.Id));
+        for (auto field : lane.child("link").children())
+        {
+            const bool predecessor = Named(field, "predecessor");
+            if (!predecessor && !Named(field, "successor"))
+                continue;
+            Add(Document.GetId(field), "id", EntityKind::Lane, GetLinkedLane(entity.Id, predecessor, field));
+        }
     }
     for (auto junction : root.children("junction"))
     {

@@ -3,6 +3,7 @@
 #include <map>
 #include <set>
 #include <string_view>
+#include <tuple>
 
 namespace odreditor
 {
@@ -52,7 +53,7 @@ struct ValidityScope
     std::vector<NodeId>              Sections;
     NodeId                           Road = 0;
     std::string                      Error;
-    std::vector<std::pair<int, int>> Ranges;
+    std::vector<std::pair<int, int>> Ranges = {};
 };
 class ReferenceIndex
 {
@@ -87,11 +88,11 @@ private:
     std::vector<ValidityScope>                                                 Validities;
     std::map<std::tuple<EntityKind, NodeId, std::string>, std::vector<NodeId>> Targets;
     std::unordered_map<NodeId, std::size_t>                                    EntityPositions;
-    Resolution                                                                 GetLinkedLane(NodeId lane, bool predecessor) const;
-    Resolution                                                                 GetBoundary(const Resolution& roads, const std::string& contact) const;
-    ValidityScope                                                              GetValidityScope(NodeId owner) const;
-    void Add(NodeId source, const char* attribute, EntityKind kind, Resolution target, DeleteRule rule = DeleteRule::RemoveRecord);
-    void BuildReferences();
+    Resolution    GetLinkedLane(NodeId lane, bool predecessor, pugi::xml_node field = {}) const;
+    Resolution    GetBoundary(const Resolution& roads, const std::string& contact) const;
+    ValidityScope GetValidityScope(NodeId owner) const;
+    void          Add(NodeId source, const char* attribute, EntityKind kind, Resolution target, DeleteRule rule = DeleteRule::RemoveRecord);
+    void          BuildReferences();
 };
 EntityKind GetEntityKind(pugi::xml_node node);
 bool       IsDescendant(pugi::xml_node node, pugi::xml_node ancestor);

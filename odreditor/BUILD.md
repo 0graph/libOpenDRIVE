@@ -56,12 +56,29 @@ Record required attribution and dependency notices with the app.
 - No root CMake, README, or existing workflow changes are required for the initial editor.
 - If later CI is useful, add an editor-specific workflow rather than rewriting the native workflow.
 
-Proposed commands after phase 01 implements the target:
+The tested browser toolchain is Emscripten 6.0.5 with its pinned SDL 2.32.10 port
+and Dear ImGui 1.91.9b. The editor embeds Roboto Medium from that ImGui release.
+The standalone build requires Emscripten 6.0.5 or newer for the upstream library's
+floating-point `std::from_chars` support.
+
+Browser build:
 
 ```sh
 emcmake cmake -S odreditor -B .codex/build/odreditor -DCMAKE_BUILD_TYPE=Release
 cmake --build .codex/build/odreditor --target OdrEditor
 ```
+
+Native document and correction checks:
+
+```sh
+cmake -S odreditor -B .codex/build/odreditor-core -DODREDITOR_BUILD_TESTS=ON
+cmake --build .codex/build/odreditor-core --target DocumentHistoryTests LaneCorrectionTests
+ctest --test-dir .codex/build/odreditor-core --output-on-failure
+```
+
+Chromium checks cover hosted and offline startup, normal/high DPI, context recovery,
+editing, download, and reopen. The managed browser policy blocks `file://`;
+direct-file launch and Firefox remain unverified in this environment.
 
 ## Single HTML packaging
 

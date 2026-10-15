@@ -19,7 +19,11 @@ canvas{display:block;width:100%;height:100%;outline:none;touch-action:none}
 var Module={
  canvas:document.getElementById('canvas'),
  onRuntimeInitialized(){document.getElementById('loading').remove();},
- onAbort(){document.getElementById('loading').textContent='Editor could not start. WebGL 2 is required.';}
+ onAbort(){
+  const status=document.getElementById('loading') || document.body.appendChild(document.createElement('div'));
+  status.id='loading';
+  status.textContent='Editor stopped. Reload to restart.';
+ }
 };
 </script>
 {{{ SCRIPT }}}

@@ -4,7 +4,7 @@ namespace odreditor
 {
 inline constexpr char Notices[] = R"notices(OpenDRIVE editor
 libOpenDRIVE and this editor: GPL-3.0
-Dear ImGui and its embedded ProggyClean font: MIT
+Dear ImGui: MIT; Roboto Medium font: Apache-2.0
 pugixml: MIT; fmt: MIT; magic_enum: MIT; SDL2: zlib
 Emscripten: MIT / University of Illinois-NCSA
 

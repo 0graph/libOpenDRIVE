@@ -139,11 +139,17 @@ DeletedNodes CollectSubtree(const XodrDocument& document, NodeId root)
     visit(root);
     return nodes;
 }
+bool IsLaneSide(pugi::xml_node node)
+{
+    const std::string_view side = node.name();
+    return (side == "left" || side == "right" || side == "center") && std::string_view(node.parent().name()) == "laneSection" &&
+           std::string_view(node.parent().parent().name()) == "lanes" && GetEntityKind(node.parent().parent().parent()) == EntityKind::Road;
+}
 std::vector<NodeId> GetSideLanes(const XodrDocument& document, NodeId side)
 {
     auto              node = document.GetNode(side);
     const std::string name = node.name();
-    if (name != "left" && name != "right" && name != "center")
+    if (!IsLaneSide(node))
         throw std::runtime_error("Select a lane side");
     std::vector<std::pair<long long, NodeId>> lanes;
     std::set<int>                             ids;
@@ -253,7 +259,7 @@ void ApplyCorrections(XodrDocument& document, const ReferenceIndex& index, const
     for (auto id : roots)
         document.RemoveElement(id);
 }
-void CheckMovedReferences(const XodrDocument& document, const ReferenceIndex& before)
+void CheckPreservedReferences(const XodrDocument& document, const ReferenceIndex& before)
 {
     ReferenceIndex after(document);
     for (const auto& reference : before.GetReferences())
@@ -266,7 +272,7 @@ void CheckMovedReferences(const XodrDocument& document, const ReferenceIndex& be
                          [&](const Reference& current) { return current.Source == reference.Source && current.Attribute == reference.Attribute; });
         if (found == after.GetReferences().end() || found->Target.Targets != reference.Target.Targets ||
             found->Target.Error != reference.Target.Error)
-            throw EditException(reference.Source, "Move changes a reference target; edit the relationship first");
+            throw EditException(reference.Source, "Edit changes a reference target; edit the relationship first");
     }
     auto memberships = [&](const ReferenceIndex& index, const ValidityScope& scope)
     {
@@ -296,7 +302,7 @@ void CheckMovedReferences(const XodrDocument& document, const ReferenceIndex& be
         auto found = std::find_if(
             after.GetValidities().begin(), after.GetValidities().end(), [&](const ValidityScope& current) { return current.Owner == scope.Owner; });
         if (found == after.GetValidities().end() || !found->Error.empty() || memberships(before, scope) != memberships(after, *found))
-            throw EditException(scope.Owner, "Move changes validity membership; edit its owner first");
+            throw EditException(scope.Owner, "Edit changes validity membership; edit its owner first");
     }
 }
 } // namespace odreditor

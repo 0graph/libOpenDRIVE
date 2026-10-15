@@ -37,12 +37,40 @@ std::string Lowercase(std::string text)
     std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
     return text;
 }
+std::string Path(pugi::xml_node node)
+{
+    std::string path;
+    for (; node && node.type() != pugi::node_document; node = node.parent())
+    {
+        std::string part = node.name();
+        if (node.attribute("id"))
+            part += "[" + std::string(node.attribute("id").value()) + "]";
+        else if (std::string_view(node.name()) == "laneSection")
+            part += "[s=" + std::string(node.attribute("s").value()) + "]";
+        path = "/" + part + path;
+    }
+    return path;
+}
+void DrawSplitter(const char* name, float& width, float direction)
+{
+    ImGui::SameLine();
+    ImGui::InvisibleButton(name, {4, -1});
+    if (ImGui::IsItemActive())
+        width += direction * ImGui::GetIO().MouseDelta.x;
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+    {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        ImGui::GetWindowDrawList()->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), ImGui::GetColorU32(ImGuiCol_Header));
+    }
+    ImGui::SameLine();
+}
 void Section(const char* title)
 {
     const auto pos = ImGui::GetCursorScreenPos();
     const auto width = ImGui::GetContentRegionAvail().x;
     const auto height = ImGui::GetFrameHeight();
-    ImGui::GetWindowDrawList()->AddRectFilled(pos, {pos.x + width, pos.y + height}, ImGui::GetColorU32(ImGuiCol_Header), 3);
+    ImGui::GetWindowDrawList()->AddRectFilled(
+        pos, {pos.x + width, pos.y + height}, ImGui::GetColorU32(ImGuiCol_Header), ImGui::GetStyle().FrameRounding);
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(title);
 }
@@ -64,6 +92,7 @@ void EditorApp::Queue(const std::function<EditResult()>& edit)
 }
 void EditorApp::EditXml(NodeId id)
 {
+    ++XmlGeneration;
     XmlTarget = id;
     XmlOriginal = XmlDraft = Document.SaveSubtree(id);
     XmlRevision = Document.GetRevision();
@@ -71,6 +100,11 @@ void EditorApp::EditXml(NodeId id)
 }
 void EditorApp::OpenDocument(const OpenedFile& file)
 {
+    if (!file.Error.empty())
+    {
+        Error = file.Error;
+        return;
+    }
     const auto result = Document.LoadDocument(file.Bytes);
     Report(result);
     if (!result)
@@ -88,6 +122,52 @@ void EditorApp::NewDocument()
     Selection = Document.GetId(Document.GetNode(DocumentNode).child("OpenDRIVE"));
     Error.clear();
     EditXml(DocumentNode);
+}
+void EditorApp::TrackPropertyInput(NodeId id, PropertyKind kind, const std::string& name, const std::string& value)
+{
+    if (!ImGui::IsItemActive() && !ImGui::IsItemDeactivatedAfterEdit())
+        return;
+    if (ActiveProperty && (ActiveProperty->Node != id || ActiveProperty->Kind != kind || ActiveProperty->Name != name))
+        PropertyEdits.push_back(std::move(*ActiveProperty));
+    ActiveProperty = PropertyDraft{id, kind, name, value};
+    PropertyActive = ImGui::IsItemActive();
+}
+bool EditorApp::CommitPropertyInputs()
+{
+    if (ActiveProperty && (!PropertyActive || PendingSave || PendingNew || PendingOpen))
+    {
+        PropertyEdits.push_back(std::move(*ActiveProperty));
+        ActiveProperty.reset();
+    }
+    bool success = true;
+    for (const auto& property : PropertyEdits)
+    {
+        NodeId     edited = property.Node;
+        EditResult result;
+        if (property.Kind == PropertyKind::Attribute)
+            result = Edit.SetAttribute(edited, property.Name, property.Value, edited);
+        else if (property.Kind == PropertyKind::Name)
+            result = Edit.RenameElement(edited, property.Value, edited);
+        else
+            result = Edit.SetText(edited, property.Value, edited);
+        Report(result);
+        success &= bool(result);
+    }
+    PropertyEdits.clear();
+    return success;
+}
+bool EditorApp::HasUnsavedChanges() const
+{
+    if (Document.IsModified() || XmlDraft != XmlOriginal)
+        return true;
+    if (!ActiveProperty)
+        return false;
+    const auto& property = *ActiveProperty;
+    const auto  node = Document.GetNode(property.Node);
+    const char* value = property.Kind == PropertyKind::Name   ? node.name()
+                        : property.Kind == PropertyKind::Text ? node.value()
+                                                              : node.attribute(property.Name.c_str()).value();
+    return property.Value != value;
 }
 void EditorApp::SaveDocument()
 {
@@ -132,7 +212,7 @@ void EditorApp::DrawMenu()
         if (ImGui::MenuItem("Open...", "Ctrl+O"))
             ChooseFile();
         if (ImGui::MenuItem("Save", "Ctrl+S"))
-            SaveDocument();
+            PendingSave = true;
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Edit"))
@@ -163,8 +243,8 @@ void EditorApp::DrawMenu()
         ImGui::MenuItem("About", nullptr, &ShowNotices);
         ImGui::EndMenu();
     }
-    ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::CalcTextSize(FileName.c_str()).x - 32);
-    ImGui::TextDisabled("%s%s", FileName.c_str(), Document.IsModified() ? " *" : "");
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 24, ImGui::GetWindowWidth() - ImGui::CalcTextSize(FileName.c_str()).x - 32));
+    ImGui::TextDisabled("%s%s", FileName.c_str(), HasUnsavedChanges() ? " *" : "");
     ImGui::EndMainMenuBar();
 }
 void EditorApp::DrawTreeNode(NodeId id)
@@ -222,22 +302,27 @@ void EditorApp::DrawTree()
     Section("Document");
     ImGui::SetNextItemWidth(-1);
     ImGui::InputTextWithHint("##search", "Search elements", &Search);
-    Matches.clear();
-    if (!Search.empty())
+    if (IndexedSearch != Search || SearchRevision != Document.GetRevision())
     {
-        const auto                          query = Lowercase(Search);
-        std::function<void(pugi::xml_node)> match = [&](pugi::xml_node node)
+        IndexedSearch = Search;
+        SearchRevision = Document.GetRevision();
+        Matches.clear();
+        if (!Search.empty())
         {
-            std::string text = Label(node);
-            for (auto attribute : node.attributes())
-                text += " " + std::string(attribute.name()) + " " + attribute.value();
-            if (Lowercase(text).find(query) != std::string::npos)
-                for (auto ancestor = node; ancestor; ancestor = ancestor.parent())
-                    Matches.insert(Document.GetId(ancestor));
-            for (auto child : node.children())
-                match(child);
-        };
-        match(Document.GetNode(DocumentNode));
+            const auto                          query = Lowercase(Search);
+            std::function<void(pugi::xml_node)> match = [&](pugi::xml_node node)
+            {
+                std::string text = Label(node);
+                for (auto attribute : node.attributes())
+                    text += " " + std::string(attribute.name()) + " " + attribute.value();
+                if (Lowercase(text).find(query) != std::string::npos)
+                    for (auto ancestor = node; ancestor; ancestor = ancestor.parent())
+                        Matches.insert(Document.GetId(ancestor));
+                for (auto child : node.children())
+                    match(child);
+            };
+            match(Document.GetNode(DocumentNode));
+        }
     }
     ImGui::BeginChild("Elements", {0, 0});
     for (auto id : Document.GetChildren(DocumentNode))
@@ -270,7 +355,7 @@ bool EditorApp::DrawReferencePicker(NodeId id, const std::string& name, const st
                 Queue([this, id, name, key] { return Edit.SetAttribute(id, name, key, Selection); });
             }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s", Document.GetNode(entity.Id).path().c_str());
+                ImGui::SetTooltip("%s", Path(Document.GetNode(entity.Id)).c_str());
             ImGui::PopID();
         }
         ImGui::EndCombo();
@@ -290,17 +375,24 @@ void EditorApp::DrawProperties()
     {
         ImGui::SetNextItemWidth(-1);
         ImGui::InputText("##name", &name);
-        if (ImGui::IsItemDeactivatedAfterEdit())
-            Queue([this, id, name] { return Edit.RenameElement(id, name, Selection); });
+        TrackPropertyInput(id, PropertyKind::Name, {}, name);
     }
     else if (node.type() != pugi::node_declaration)
     {
         std::string value = node.value();
         ImGui::TextDisabled("%s", Label(node).c_str());
         ImGui::InputTextMultiline("##text", &value, {-1, 120});
-        if (ImGui::IsItemDeactivatedAfterEdit())
-            Queue([this, id, value] { return Edit.SetText(id, value, Selection); });
+        TrackPropertyInput(id, PropertyKind::Text, {}, value);
     }
+    DrawAttributes(id);
+    DrawChildren(id);
+    DrawReferences(id);
+    DrawSiblingActions(id);
+    ImGui::PopID();
+}
+void EditorApp::DrawAttributes(NodeId id)
+{
+    auto node = Document.GetNode(id);
     if (ImGui::BeginTable("Attributes", 2, ImGuiTableFlags_SizingStretchProp))
     {
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 0.34f);
@@ -321,8 +413,7 @@ void EditorApp::DrawProperties()
             if (!DrawReferencePicker(id, key, value))
             {
                 ImGui::InputTextWithHint("##value", "(empty)", &value);
-                if (ImGui::IsItemDeactivatedAfterEdit())
-                    Queue([this, id, key, value] { return Edit.SetAttribute(id, key, value, Selection); });
+                TrackPropertyInput(id, PropertyKind::Attribute, key, value);
             }
             ImGui::SameLine(0, 4);
             if (ImGui::Button("x"))
@@ -354,6 +445,10 @@ void EditorApp::DrawProperties()
             ImGui::EndPopup();
         }
     }
+}
+void EditorApp::DrawChildren(NodeId id)
+{
+    auto node = Document.GetNode(id);
     ImGui::Spacing();
     if (node.type() == pugi::node_element && ImGui::CollapsingHeader("Children", ImGuiTreeNodeFlags_DefaultOpen))
     {
@@ -377,6 +472,9 @@ void EditorApp::DrawProperties()
         }
         ImGui::EndDisabled();
     }
+}
+void EditorApp::DrawReferences(NodeId id)
+{
     if (References->GetEntity(id) && ImGui::CollapsingHeader("References"))
     {
         for (const auto& reference : References->GetReferences())
@@ -385,31 +483,48 @@ void EditorApp::DrawProperties()
                 continue;
             ImGui::PushID(reinterpret_cast<void*>(static_cast<std::uintptr_t>(reference.Source)));
             ImGui::PushID(reference.Attribute.c_str());
-            auto label = Document.GetNode(reference.Source).path() + " @" + reference.Attribute;
+            auto label = Path(Document.GetNode(reference.Source)) + " @" + reference.Attribute;
             if (ImGui::Selectable(label.c_str()))
                 Selection = reference.Source;
             ImGui::PopID();
             ImGui::PopID();
         }
     }
+}
+void EditorApp::DrawSiblingActions(NodeId id)
+{
+    auto node = Document.GetNode(id);
     ImGui::Spacing();
+    const bool lane = GetEntityKind(node) == EntityKind::Lane;
+    auto       previous = lane ? node.previous_sibling("lane") : node.previous_sibling();
+    auto       next = lane ? node.next_sibling("lane") : node.next_sibling();
+    while (previous && !IsVisible(previous))
+        previous = previous.previous_sibling();
+    while (next && !IsVisible(next))
+        next = next.next_sibling();
+    const auto parent = Document.GetId(node.parent());
+    ImGui::BeginDisabled(!previous || parent == DocumentNode);
     if (ImGui::Button("Up"))
     {
-        const auto previous = Document.GetId(node.previous_sibling()), parent = Document.GetId(node.parent());
-        if (previous)
-            Queue([this, id, parent, previous] { return Edit.Move(id, parent, previous, Selection); });
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Down") && node.next_sibling())
-    {
-        const auto before = Document.GetId(node.next_sibling().next_sibling()), parent = Document.GetId(node.parent());
+        const auto before = Document.GetId(previous);
         Queue([this, id, parent, before] { return Edit.Move(id, parent, before, Selection); });
     }
+    ImGui::EndDisabled();
     ImGui::SameLine();
+    ImGui::BeginDisabled(!next || parent == DocumentNode);
+    if (ImGui::Button("Down"))
+    {
+        const auto before = Document.GetId(lane ? next.next_sibling("lane") : next.next_sibling());
+        Queue([this, id, parent, before] { return Edit.Move(id, parent, before, Selection); });
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(parent == DocumentNode && node.type() == pugi::node_element);
     if (ImGui::Button("Delete"))
         DeleteSelection();
-    ImGui::PopID();
+    ImGui::EndDisabled();
 }
+
 void EditorApp::DrawXml()
 {
     if (!ShowXml)
@@ -444,7 +559,9 @@ void EditorApp::DrawXml()
         EditXml(Document.GetNode(XmlTarget) ? XmlTarget : DocumentNode);
     ImGui::SameLine();
     ImGui::TextDisabled("%s", XmlTarget == DocumentNode ? "Whole document" : "Selected subtree");
+    ImGui::PushID(static_cast<int>(XmlGeneration));
     ImGui::InputTextMultiline("##xml", &XmlDraft, {-1, -1}, ImGuiInputTextFlags_AllowTabInput);
+    ImGui::PopID();
 }
 void EditorApp::DrawDialogs()
 {
@@ -501,23 +618,24 @@ void EditorApp::DrawDialogs()
 }
 void EditorApp::Draw()
 {
+    PropertyActive = false;
     if (auto file = TakeOpenedFile())
-        PendingOpen = std::move(file);
-    const auto& io = ImGui::GetIO();
-    if (!References || ReferenceRevision != Document.GetRevision())
     {
-        References = std::make_unique<ReferenceIndex>(Document);
-        ReferenceRevision = Document.GetRevision();
+        if (file->Error.empty())
+            PendingOpen = std::move(file);
+        else
+            Error = file->Error;
     }
+    const auto& io = ImGui::GetIO();
     DrawMenu();
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S))
+        PendingSave = true;
     if (!io.WantTextInput && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId))
     {
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O))
             ChooseFile();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_N))
             PendingNew = true;
-        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S))
-            SaveDocument();
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z))
         {
             if (io.KeyShift)
@@ -533,6 +651,11 @@ void EditorApp::Draw()
         if (ImGui::IsKeyPressed(ImGuiKey_Delete))
             DeleteSelection();
     }
+    if (!References || ReferenceRevision != Document.GetRevision())
+    {
+        References = std::make_unique<ReferenceIndex>(Document);
+        ReferenceRevision = Document.GetRevision();
+    }
     const float top = ImGui::GetFrameHeight(), bottom = ImGui::GetFrameHeight();
     ImGui::SetNextWindowPos({0, top});
     ImGui::SetNextWindowSize({io.DisplaySize.x, std::max(1.0f, io.DisplaySize.y - top - bottom)});
@@ -543,42 +666,40 @@ void EditorApp::Draw()
     ImGui::BeginChild("Document", {TreeWidth, 0});
     DrawTree();
     ImGui::EndChild();
-    ImGui::SameLine();
-    ImGui::InvisibleButton("Tree splitter", {4, -1});
-    if (ImGui::IsItemActive())
-        TreeWidth += io.MouseDelta.x;
-    if (ImGui::IsItemHovered())
-        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-    ImGui::SameLine();
+    DrawSplitter("Tree splitter", TreeWidth, 1);
     ImGui::BeginChild("Center", {std::max(1.0f, ImGui::GetContentRegionAvail().x - InspectorWidth - 20), 0});
     DrawXml();
     ImGui::EndChild();
-    ImGui::SameLine();
-    ImGui::InvisibleButton("Inspector splitter", {4, -1});
-    if (ImGui::IsItemActive())
-        InspectorWidth -= io.MouseDelta.x;
-    if (ImGui::IsItemHovered())
-        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-    ImGui::SameLine();
+    DrawSplitter("Inspector splitter", InspectorWidth, -1);
     ImGui::BeginChild("Properties", {0, 0});
     DrawProperties();
     ImGui::EndChild();
     ImGui::End();
-    DrawDialogs();
-    if (Deferred)
+    const bool inputsValid = CommitPropertyInputs();
+    if (!inputsValid)
+    {
+        PendingNew = false;
+        PendingOpen.reset();
+    }
+    if (Deferred && inputsValid)
     {
         auto action = std::move(Deferred);
         Deferred = {};
         action();
     }
-    SetModified(Document.IsModified() || XmlDraft != XmlOriginal);
+    Deferred = {};
+    DrawDialogs();
+    if (PendingSave && inputsValid)
+        SaveDocument();
+    PendingSave = false;
+    SetModified(HasUnsavedChanges());
     ImGui::SetNextWindowPos({0, io.DisplaySize.y - bottom});
     ImGui::SetNextWindowSize({io.DisplaySize.x, bottom});
     ImGui::Begin("Status", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
     if (!Error.empty())
         ImGui::TextUnformatted(Error.c_str());
     else
-        ImGui::TextDisabled("%s", Document.GetNode(Selection).path().c_str());
+        ImGui::TextDisabled("%s", Path(Document.GetNode(Selection)).c_str());
     ImGui::End();
 }
 } // namespace odreditor

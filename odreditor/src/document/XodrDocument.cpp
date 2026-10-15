@@ -43,6 +43,8 @@ XodrDocument::XodrDocument()
 
 EditResult XodrDocument::LoadDocument(const std::string& source)
 {
+    if (Pending)
+        return {"Finish the current edit before opening a document"};
     pugi::xml_document candidate;
     auto               result = candidate.load_buffer(source.data(), source.size(), ParseFlags, pugi::encoding_auto);
     if (!result)
@@ -72,8 +74,8 @@ EditResult XodrDocument::LoadDocument(const std::string& source)
 
 void XodrDocument::CreateDocument()
 {
-    LoadDocument(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<OpenDRIVE><header revMajor=\"1\" revMinor=\"4\" name=\"\" version=\"1.0\"/></OpenDRIVE>\n");
+    LoadDocument("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<OpenDRIVE>\n  <header revMajor=\"1\" revMinor=\"4\" name=\"\" "
+                 "version=\"1.0\"/>\n</OpenDRIVE>\n");
 }
 std::string XodrDocument::SaveDocument() const
 {

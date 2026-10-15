@@ -1,4 +1,5 @@
 #include "FileBridge.h"
+#include "FontData.h"
 #include "ui/EditorApp.h"
 #include "ui/Theme.h"
 #include <GLES3/gl3.h>
@@ -51,8 +52,9 @@ void DrawFrame()
         ImGui_ImplOpenGL3_DestroyDeviceObjects();
         io.Fonts->Clear();
         ImFontConfig config;
-        config.SizePixels = 13.0f * dpi;
-        io.Fonts->AddFontDefault(&config);
+        config.SizePixels = odreditor::BaseFontSize * dpi;
+        config.FontDataOwnedByAtlas = false;
+        io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(odreditor::FontData), sizeof(odreditor::FontData), config.SizePixels, &config);
         io.FontGlobalScale = 1.0f / dpi;
         App->FontScale = dpi;
         App->ContextRestored = false;

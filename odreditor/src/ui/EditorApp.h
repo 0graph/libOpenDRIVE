@@ -1,4 +1,5 @@
 #pragma once
+#include "Theme.h"
 #include "document/XodrDocument.h"
 #include "edit/Commands.h"
 #include "platform/FileBridge.h"
@@ -15,20 +16,45 @@ public:
     void Draw();
 
 private:
+    void DrawAttributes(NodeId id);
+    void DrawChildren(NodeId id);
+    void DrawReferences(NodeId id);
+    void DrawSiblingActions(NodeId id);
+    enum class PropertyKind
+    {
+        Attribute,
+        Name,
+        Text
+    };
+    struct PropertyDraft
+    {
+        NodeId       Node;
+        PropertyKind Kind;
+        std::string  Name, Value;
+    };
+    std::optional<PropertyDraft>    ActiveProperty;
+    std::vector<PropertyDraft>      PropertyEdits;
+    bool                            PropertyActive = false, PendingSave = false;
+    void                            TrackPropertyInput(NodeId id, PropertyKind kind, const std::string& name, const std::string& value);
+    bool                            CommitPropertyInputs();
+    bool                            HasUnsavedChanges() const;
     XodrDocument                    Document;
     Commands                        Edit{Document};
     NodeId                          Selection = 0;
-    float                           TreeWidth = 250, InspectorWidth = 310;
+    float                           TreeWidth = DefaultTreeWidth, InspectorWidth = DefaultInspectorWidth;
     std::string                     FileName = "untitled.xodr";
     std::string                     Search, Error;
     std::string                     AttributeName, AttributeValue, ElementName;
     std::string                     XmlDraft, XmlOriginal;
     NodeId                          XmlTarget = DocumentNode;
     std::uint64_t                   XmlRevision = 0;
+    unsigned                        XmlGeneration = 0;
     bool                            ShowXml = true, ShowNotices = false, ShowDiagnostics = false;
     bool                            PendingNew = false;
     std::optional<OpenedFile>       PendingOpen;
     std::function<void()>           Deferred;
+    std::string                     IndexedSearch;
+    std::uint64_t                   SearchRevision = 0;
     std::unordered_set<NodeId>      Matches;
     std::unique_ptr<ReferenceIndex> References;
     std::uint64_t                   ReferenceRevision = 0;

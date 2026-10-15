@@ -84,6 +84,10 @@ EditResult Commands::RenameIds(const IdChanges& changes, NodeId& selection)
 }
 EditResult Commands::SetAttribute(NodeId id, const std::string& name, const std::optional<std::string>& value, NodeId& selection)
 {
+    auto node = Document.GetNode(id);
+    auto current = node.attribute(name.c_str());
+    if (node && ((value && current && *value == current.value()) || (!value && !current)))
+        return {};
     if (name == "id" && GetEntityKind(Document.GetNode(id)) != EntityKind::None)
     {
         if (!value)
@@ -94,6 +98,8 @@ EditResult Commands::SetAttribute(NodeId id, const std::string& name, const std:
 }
 EditResult Commands::RenameElement(NodeId id, const std::string& name, NodeId& selection)
 {
+    if (Document.GetNode(id) && name == Document.GetNode(id).name())
+        return {};
     if (GetEntityKind(Document.GetNode(id)) != EntityKind::None && name != Document.GetNode(id).name())
         return {"Use raw XML to change an identity-bearing element type", id};
     return Document.Apply("Rename element",
@@ -103,7 +109,7 @@ EditResult Commands::RenameElement(NodeId id, const std::string& name, NodeId& s
                               ReferenceIndex before(Document);
                               Document.RenameElement(id, name);
                               CheckDestination(ReferenceIndex(Document), Descendants(Document, id));
-                              CheckMovedReferences(Document, before);
+                              CheckPreservedReferences(Document, before);
                           });
 }
 EditResult Commands::SetText(NodeId id, const std::string& value, NodeId& selection)
@@ -131,12 +137,13 @@ EditResult Commands::InsertLane(NodeId side, std::size_t position, NodeId& selec
                               selection = Document.InsertElement(side, "lane", position < order.size() ? order[position] : 0);
                               Document.SetAttribute(selection, "id", std::to_string(sign * static_cast<int>(position + 1)));
                               Document.SetAttribute(selection, "type", sideName == "center" ? "none" : "driving");
+                              CheckPreservedReferences(Document, index);
                           });
 }
 EditResult Commands::Insert(NodeId parent, const std::string& name, NodeId& selection)
 {
     auto owner = Document.GetNode(parent);
-    if (name == "lane" && std::string_view(owner.parent().name()) == "laneSection")
+    if (name == "lane" && IsLaneSide(owner))
     {
         std::size_t count = 0;
         for (auto lane : owner.children("lane"))
@@ -155,6 +162,7 @@ EditResult Commands::Insert(NodeId parent, const std::string& name, NodeId& sele
                               ReferenceIndex after(Document);
                               if (const auto* entity = after.GetEntity(selection))
                                   Document.SetAttribute(selection, "id", FreshId(before, entity->Kind, entity->Scope));
+                              CheckPreservedReferences(Document, before);
                           });
 }
 EditResult Commands::Delete(NodeId id, NodeId& selection)
@@ -263,6 +271,7 @@ EditResult Commands::Duplicate(NodeId id, NodeId& selection)
                 Document.SetAttribute(copies.at(reference.Source), reference.Attribute, copyKeys.at(reference.Target.Targets.front()));
             }
             CheckDestination(ReferenceIndex(Document), copy);
+            CheckPreservedReferences(Document, before);
         });
 }
 EditResult Commands::Move(NodeId id, NodeId parent, NodeId beforeId, NodeId& selection)
@@ -313,7 +322,7 @@ EditResult Commands::Move(NodeId id, NodeId parent, NodeId beforeId, NodeId& sel
                                   if (before.GetEntity(movedId) && !after.GetEntity(movedId))
                                       throw std::runtime_error("Destination changes identity scope; use raw XML");
                               CheckDestination(after, moved);
-                              CheckMovedReferences(Document, before);
+                              CheckPreservedReferences(Document, before);
                           });
 }
 EditResult Commands::ReplaceXml(NodeId id, const std::string& xml, NodeId& selection)

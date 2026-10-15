@@ -8,6 +8,8 @@ ambiguity failures, and history. Chromium verifies corrected keyboard deletion,
 save, and undo. Direct-junction lane corrections remain explicit raw XML edits.
 Validity spans use `validLength` and repeat intervals; physical object dimensions
 do not implicitly expand lane applicability.
+Insertion, duplication, and scope changes preserve existing reference targets and
+validity membership; an unsafe result is rejected as one atomic edit.
 
 ## Deliverable
 

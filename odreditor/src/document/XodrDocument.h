@@ -18,7 +18,7 @@ struct EditResult
 {
     std::string Error;
     NodeId      Node = 0;
-    std::string Notice;
+    std::string Notice = {};
     explicit    operator bool() const
     {
         return Error.empty();
