@@ -1,6 +1,10 @@
 # Phase 01 App foundation
 
-Status: planned. Dependencies: none.
+Status: implemented. Dependencies: none.
+
+Verified with Emscripten 6.0.5, SDL 2.32.10, and Dear ImGui 1.91.9b.
+Chromium hosted/offline checks passed at 1x and 2x DPI, including resize and file input.
+The environment browser policy blocks file://; direct-file launch and Firefox remain unverified.
 
 ## Deliverable
 

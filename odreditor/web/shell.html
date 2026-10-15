@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>OpenDRIVE editor</title>
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#f5f9ff}
+canvas{display:block;width:100%;height:100%;outline:none;touch-action:none}
+#loading{position:absolute;inset:0;display:grid;place-content:center;font:13px sans-serif;color:#596f91;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="canvas" tabindex="0" aria-label="OpenDRIVE document editor"></canvas>
+<div id="loading" role="status">Opening editor…</div>
+<input id="file-input" type="file" accept=".xodr,.xml" hidden>
+<script>
+var Module={
+ canvas:document.getElementById('canvas'),
+ onRuntimeInitialized(){document.getElementById('loading').remove();},
+ onAbort(){document.getElementById('loading').textContent='Editor could not start. WebGL 2 is required.';}
+};
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>
