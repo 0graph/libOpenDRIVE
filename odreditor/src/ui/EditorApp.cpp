@@ -54,7 +54,7 @@ EditorApp::EditorApp()
 }
 void EditorApp::Report(const EditResult& result)
 {
-    Error = result.Error;
+    Error = result.Error.empty() ? result.Notice : result.Error;
     if (!result && result.Node && Document.GetNode(result.Node))
         Selection = result.Node;
 }
@@ -244,6 +244,39 @@ void EditorApp::DrawTree()
         DrawTreeNode(id);
     ImGui::EndChild();
 }
+bool EditorApp::DrawReferencePicker(NodeId id, const std::string& name, const std::string& value)
+{
+    auto reference = std::find_if(References->GetReferences().begin(),
+                                  References->GetReferences().end(),
+                                  [&](const Reference& field) { return field.Source == id && field.Attribute == name; });
+    if (reference == References->GetReferences().end())
+        return false;
+    if (ImGui::BeginCombo("##target", value.c_str()))
+    {
+        ImGui::InputTextWithHint("##filter", "Find target", &ReferenceSearch);
+        const auto query = Lowercase(ReferenceSearch);
+        for (const auto& entity : References->GetEntities())
+        {
+            if (entity.Kind != reference->Kind ||
+                std::find(reference->Target.Scopes.begin(), reference->Target.Scopes.end(), entity.Scope) == reference->Target.Scopes.end())
+                continue;
+            const auto label = Label(Document.GetNode(entity.Id));
+            if (!query.empty() && Lowercase(label).find(query) == std::string::npos)
+                continue;
+            ImGui::PushID(reinterpret_cast<void*>(static_cast<std::uintptr_t>(entity.Id)));
+            if (ImGui::Selectable(label.c_str(), value == entity.Key))
+            {
+                const auto key = entity.Key;
+                Queue([this, id, name, key] { return Edit.SetAttribute(id, name, key, Selection); });
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", Document.GetNode(entity.Id).path().c_str());
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    return true;
+}
 void EditorApp::DrawProperties()
 {
     Section("Properties");
@@ -285,9 +318,12 @@ void EditorApp::DrawProperties()
                 ImGui::SetTooltip("%s", key.c_str());
             ImGui::TableNextColumn();
             ImGui::SetNextItemWidth(std::max(40.0f, ImGui::GetContentRegionAvail().x - 28));
-            ImGui::InputTextWithHint("##value", "(empty)", &value);
-            if (ImGui::IsItemDeactivatedAfterEdit())
-                Queue([this, id, key, value] { return Edit.SetAttribute(id, key, value, Selection); });
+            if (!DrawReferencePicker(id, key, value))
+            {
+                ImGui::InputTextWithHint("##value", "(empty)", &value);
+                if (ImGui::IsItemDeactivatedAfterEdit())
+                    Queue([this, id, key, value] { return Edit.SetAttribute(id, key, value, Selection); });
+            }
             ImGui::SameLine(0, 4);
             if (ImGui::Button("x"))
                 Queue([this, id, key] { return Edit.SetAttribute(id, key, std::nullopt, Selection); });
@@ -340,6 +376,21 @@ void EditorApp::DrawProperties()
             Queue([this, id, childName] { return Edit.Insert(id, childName, Selection); });
         }
         ImGui::EndDisabled();
+    }
+    if (References->GetEntity(id) && ImGui::CollapsingHeader("References"))
+    {
+        for (const auto& reference : References->GetReferences())
+        {
+            if (std::find(reference.Target.Targets.begin(), reference.Target.Targets.end(), id) == reference.Target.Targets.end())
+                continue;
+            ImGui::PushID(reinterpret_cast<void*>(static_cast<std::uintptr_t>(reference.Source)));
+            ImGui::PushID(reference.Attribute.c_str());
+            auto label = Document.GetNode(reference.Source).path() + " @" + reference.Attribute;
+            if (ImGui::Selectable(label.c_str()))
+                Selection = reference.Source;
+            ImGui::PopID();
+            ImGui::PopID();
+        }
     }
     ImGui::Spacing();
     if (ImGui::Button("Up"))
@@ -453,6 +504,11 @@ void EditorApp::Draw()
     if (auto file = TakeOpenedFile())
         PendingOpen = std::move(file);
     const auto& io = ImGui::GetIO();
+    if (!References || ReferenceRevision != Document.GetRevision())
+    {
+        References = std::make_unique<ReferenceIndex>(Document);
+        ReferenceRevision = Document.GetRevision();
+    }
     DrawMenu();
     if (!io.WantTextInput && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId))
     {

@@ -1,6 +1,13 @@
 # Phase 03 Deterministic corrections
 
-Status: planned. Dependencies: phase 02.
+Status: implemented. Dependencies: phase 02.
+
+Native and AddressSanitizer/UBSan checks cover signed lane remapping, all road-end
+contact combinations, junction scopes, validity membership, duplication, atomic
+ambiguity failures, and history. Chromium verifies corrected keyboard deletion,
+save, and undo. Direct-junction lane corrections remain explicit raw XML edits.
+Validity spans use `validLength` and repeat intervals; physical object dimensions
+do not implicitly expand lane applicability.
 
 ## Deliverable
 

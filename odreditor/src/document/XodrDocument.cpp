@@ -185,7 +185,8 @@ EditResult XodrDocument::Apply(const std::string& label, NodeId& selection, cons
             it->Undo();
         selection = Pending->BeforeSelection;
         Pending.reset();
-        return {error.what(), selection};
+        const auto* failure = dynamic_cast<const EditException*>(&error);
+        return {error.what(), failure ? failure->Node : selection};
     }
     if (!Pending->Changes.empty())
     {

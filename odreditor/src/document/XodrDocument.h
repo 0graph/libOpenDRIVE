@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <pugixml.hpp>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -17,10 +18,17 @@ struct EditResult
 {
     std::string Error;
     NodeId      Node = 0;
+    std::string Notice;
     explicit    operator bool() const
     {
         return Error.empty();
     }
+};
+
+struct EditException : std::runtime_error
+{
+    NodeId Node;
+    EditException(NodeId node, const std::string& error) : std::runtime_error(error), Node(node) {}
 };
 
 class XodrDocument

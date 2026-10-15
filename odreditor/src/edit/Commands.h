@@ -1,5 +1,5 @@
 #pragma once
-#include "document/XodrDocument.h"
+#include "Corrections.h"
 
 namespace odreditor
 {
@@ -14,6 +14,9 @@ public:
     EditResult Delete(NodeId id, NodeId& selection);
     EditResult Duplicate(NodeId id, NodeId& selection);
     EditResult Move(NodeId id, NodeId parent, NodeId before, NodeId& selection);
+    EditResult RenameIds(const IdChanges& changes, NodeId& selection);
+    EditResult InsertLane(NodeId side, std::size_t position, NodeId& selection);
+    EditResult ReorderLanes(NodeId side, const std::vector<NodeId>& order, NodeId& selection);
     EditResult ReplaceXml(NodeId id, const std::string& xml, NodeId& selection);
 
 private:

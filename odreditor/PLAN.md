@@ -1,6 +1,6 @@
 # OpenDRIVE editor plan
 
-Status: specification; implementation phases are planned.
+Status: phases 01–03 implemented; phases 04–08 remain planned.
 
 ## Product contract
 
