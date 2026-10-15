@@ -15,11 +15,27 @@ Module.initializeFileBridge = function() {
     input.addEventListener('change', () => { open(input.files[0]); input.value = ''; });
     window.addEventListener('dragover', event => event.preventDefault());
     window.addEventListener('drop', event => { event.preventDefault(); open(event.dataTransfer.files[0]); });
+    window.addEventListener('paste', event => {
+        if (document.activeElement !== Module.canvas) return;
+        event.preventDefault();
+        const bytes = new TextEncoder().encode(event.clipboardData.getData('text/plain'));
+        const pointer = Module._malloc(bytes.length + 1);
+        try {
+            HEAPU8.set(bytes, pointer);
+            HEAPU8[pointer + bytes.length] = 0;
+            Module.ccall('ReceiveText', null, ['number'], [pointer]);
+        } finally {
+            Module._free(pointer);
+        }
+    });
     window.addEventListener('beforeunload', event => {
         if (!Module.documentModified) return;
         event.preventDefault();
         event.returnValue = '';
     });
+};
+Module.copyText = function(text) {
+    if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
 };
 Module.downloadFile = function(name, pointer, size) {
     // Blob owns a copy; C++ can release the source bytes on return.

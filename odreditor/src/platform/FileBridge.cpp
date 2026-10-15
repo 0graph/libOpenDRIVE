@@ -1,5 +1,6 @@
 #include "FileBridge.h"
 #include <emscripten.h>
+#include <imgui.h>
 #include <utility>
 
 namespace
@@ -13,10 +14,19 @@ extern "C" EMSCRIPTEN_KEEPALIVE void ReceiveFile(const char* name, const char* b
     PendingFile = odreditor::OpenedFile{name, std::string(bytes, size)};
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE void ReceiveText(const char* text)
+{
+    if (ImGui::GetIO().WantTextInput)
+        ImGui::GetIO().AddInputCharactersUTF8(text);
+}
+
 namespace odreditor
 {
 void InitializeFileBridge()
 {
+    auto& platform = ImGui::GetPlatformIO();
+    platform.Platform_GetClipboardTextFn = [](ImGuiContext*) { return ""; };
+    platform.Platform_SetClipboardTextFn = [](ImGuiContext*, const char* text) { EM_ASM({ Module.copyText(UTF8ToString($0)); }, text); };
     EM_ASM({ Module.initializeFileBridge(); });
 }
 

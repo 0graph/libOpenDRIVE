@@ -1,6 +1,10 @@
 # Phase 02 Document editing
 
-Status: planned. Dependencies: phase 01.
+Status: implemented. Dependencies: phase 01.
+
+Document/history integration passes natively and with AddressSanitizer/UBSan
+(leak detection is unavailable under the environment tracer). Chromium checks
+cover property editing, raw XML, malformed drafts, undo, download, and reopen.
 
 ## Deliverable
 
